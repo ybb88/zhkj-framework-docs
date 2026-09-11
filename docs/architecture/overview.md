@@ -1,0 +1,120 @@
+# ZHKJ Framework 架构总览与设计规约
+
+> **适用版本**: OpenJDK 21 (LTS), Spring Boot 4.1.1, Spring Cloud 2025.1.2, Spring Batch 6.0.5  
+> **文档定位**: 框架总体拓扑、分层职责、模块矩阵与全局架构底线约束  
+> **架构设计与创作者**: @author Jason.Yang（274107098@qq.com）  
+
+---
+
+## 📐 1. 整体分层架构
+
+框架基于**单向依赖**和**关注点分离**原则，分为 5 个清晰的物理与逻辑层次：
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       应用业务层 (Application Layer)                     │
+│                     业务服务 / Controller / Scheduler                   │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     表现层与通信层 (Web & RPC Layer)                     │
+│   ┌───────────────────────────────┬─────────────────────────────────┐   │
+│   │ zhkj-framework-starter-web    │ zhkj-framework-starter-http     │   │
+│   │ - 统一 R<T> 响应自动封装       │ - Spring 6+ @HttpExchange RPC   │   │
+│   │ - 全局异常映射处理             │ - 全链路 Header 透传拦截器       │   │
+│   │ - XSS 请求防护过滤            │ - 全局优雅降级 FallbackFactory  │   │
+│   │ - TraceId 请求链路追踪        │ - 负载均衡微服务直连支持        │   │
+│   └───────────────────────────────┴─────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    功能起步组件层 (Starters Integration)                 │
+│   ┌───────────────────┬───────────────────┬─────────────────────────┐   │
+│   │   数据与持久化    │     数据治理      │       安全与中间件      │   │
+│   │ starter-mybatis   │ starter-tenant    │ starter-secure          │   │
+│   │ starter-jpa       │ starter-datascope │ starter-sso-client      │   │
+│   │ starter-datasource│                   │ starter-crypto          │   │
+│   │                   │                   │ starter-redis           │   │
+│   │                   │                   │ starter-kafka           │   │
+│   │                   │                   │ starter-nacos           │   │
+│   │                   │                   │ starter-openapi         │   │
+│   └───────────────────┴───────────────────┴─────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       数据抽象层 (Data API Layer)                        │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │ zhkj-framework-data-api                                         │   │
+│   │ - IAuditEntity / ITenantEntity 统一数据访问与多租户审计契约     │   │
+│   │ - PojoBaseEntity / PojoTenantEntity 纯 POJO 基础实体模型        │   │
+│   │ - 框架无关数据源提供者 (DataSourceProvider SPI)                 │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       核心基础层 (Core Engine Layer)                     │
+│   ┌───────────────────────────────┬─────────────────────────────────┐   │
+│   │ zhkj-framework-core           │ zhkj-framework-launcher         │   │
+│   │ - 统一 R<T> 响应载体          │ - ZhkjApplication 启动器        │   │
+│   │ - FrameworkContext 上下文门面 │ - 多环境配置与 Profile 探测     │   │
+│   │ - Jackson 字段动态脱敏规则    │ - 启动耗时统计与 ASCII Banner   │   │
+│   │ - 100+ 核心单数工具类库       │                                 │   │
+│   └───────────────────────────────┴─────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🧩 2. 模块职责矩阵 (18 Modules)
+
+整个框架采用扁平 Starter 组合化设计，彻底根除空壳伪聚合模块：
+
+| 层次 | 模块名 (`artifactId`) | 职责定位 | 核心类与契约 |
+| :--- | :--- | :--- | :--- |
+| **核心层** | `zhkj-framework-core` | 通用工具箱、协议模型、上下文门面、脱敏规则 | `R<T>`, `FrameworkContext`, `HeaderConstant`, `DateUtil`, `JsonUtil` |
+| **核心层** | `zhkj-framework-launcher` | 微服务/单体统一引导启动器、环境探测 | `ZhkjApplication`, `LauncherService`, `PropUtil` |
+| **数据抽象** | `zhkj-framework-data-api` | 框架无关持久化契约、审计模型、数据源 SPI | `IAuditEntity`, `ITenantEntity`, `PojoBaseEntity`, `DataSourceProvider` |
+| **通信层** | `zhkj-framework-starter-http` | 声明式 HTTP 客户端、全链路 Header 透传、优雅降级 | `@EnableHttpClients`, `@HttpExchange`, `HttpClientHeaderInterceptor` |
+| **Web层** | `zhkj-framework-starter-web` | 统一响应切面、全局异常处理、XSS 防护、TraceId | `DefaultErrorController`, `XssFilter`, `TraceFilter`, `WebUtil` |
+| **持久层** | `zhkj-framework-starter-mybatis` | MyBatis-Plus 增强、自动审计填充、国密存储加密适配 | `ZhkjMetaObjectHandler`, `MybatisTenantEntity`, `EncryptTypeHandler` |
+| **持久层** | `zhkj-framework-starter-jpa` | Spring Data JPA 增强、Hibernate 租户 Filter 适配 | `JpaTenantAutoConfiguration`, `JpaTenantEntity`, `JpaBaseEntity` |
+| **持久层** | `zhkj-framework-starter-datasource` | 动态多数据源路由、Hikari 连接池生命周期管理 | `DynamicDataSource`, `@DS`, `DynamicRoutingDataSource` |
+| **数据治理** | `zhkj-framework-starter-tenant` | 多租户上下文治理、租户规则引擎 SPI | `TenantContext`, `TenantRuleProvider`, `TenantLineHandler` |
+| **数据治理** | `zhkj-framework-starter-datascope` | 细粒度数据权限注解与 AST 树动态重写 SPI | `@DataAuth`, `ScopeModel`, `ScopeModelHandler`, `DeptAncestorProvider` |
+| **安全技术** | `zhkj-framework-starter-secure` | 无状态令牌鉴权、方法级权限、Actuator 安全保护 | `SecureUtil`, `@PreAuth`, `ActuatorSecurityConfiguration`, `AuthAspect` |
+| **安全技术** | `zhkj-framework-starter-sso-client` | 统一单点登录客户端、OAuth 2.1 授权码兑换、上下文注入 | `SsoClientFilter`, `SsoContextHolder`, `SsoClientProperties` |
+| **安全技术** | `zhkj-framework-starter-crypto` | 引导期配置解密 ENC(...)、持久层国密加密与盲索引引擎 | `EncryptablePropertyEnvironmentPostProcessor`, `BlindIndexUtil`, `SM4Util` |
+| **中间件** | `zhkj-framework-starter-redis` | 分布式缓存管理器、多级动态过期时间扩展 | `RedisAutoCacheManager`, `ZhkjRedis`, `RedisSerializer.json()` |
+| **中间件** | `zhkj-framework-starter-kafka` | 消息队列收发统一发布订阅契约 | `ZhkjKafka`, `KafkaConsumerConfig` |
+| **中间件** | `zhkj-framework-starter-nacos` | Nacos 注册发现与配置动态热更新 | `ZhkjNacosAutoConfiguration`, `NacosProperties` |
+| **基础设施** | `zhkj-framework-starter-openapi` | Knife4j 4.5.x + OpenAPI 3.0 在线接口文档集成 | `OpenApiAutoConfiguration`, `OpenApiProperties` |
+| **工程根** | `zhkj-framework` | 统一依赖版本与构建插件治理 (BOM) | `pom.xml` |
+
+---
+
+## 🛡️ 3. 架构设计黄金法则
+
+### 3.1 严格单向依赖与职责纯粹
+1. **依赖拓扑**: `core` $\rightarrow$ `data-api` $\rightarrow$ `starters` $\rightarrow$ `starter-web` $\rightarrow$ `业务微服务`。严禁反向依赖与循环依赖。
+2. **根 POM 依赖洁癖**: 根 POM `<dependencies>` 严禁声明任何业务 Starter 或运行时监控包，仅保留编译期注解器（`lombok`、`spring-boot-configuration-processor`）。
+3. **依赖扁平化**: 废弃并彻底移除了空壳聚合模块 `zhkj-framework-cloud`；微服务按需声明所需 Starter，彻底避免 WebFlux 响应式网关（Spring Cloud Gateway）与 Servlet MVC 产生类路径冲突。
+
+### 3.2 实体多态与持久层解耦
+1. **契约抽象**: `zhkj-framework-data-api` 仅提供 `IAuditEntity`、`ITenantEntity` 契约接口以及无第三方注解的纯 POJO 基类（`PojoBaseEntity`、`PojoTenantEntity`）。
+2. **ORM 专属基类**:
+   - MyBatis-Plus 实体继承 `MybatisAuditEntity` / `MybatisTenantEntity`；
+   - JPA 实体继承 `JpaBaseEntity` / `JpaTenantEntity`；
+   - 彻底杜绝强行将持久层专用注解绑架到底层通用基类的架构反模式。
+
+### 3.3 全局上下文生命周期管控 (`FrameworkContext`)
+1. **统一门面**: 租户、全局安全身份与 SSO 凭证由统一门面 `FrameworkContext`（位于 `core` 模块）纳管。
+2. **跨线程传递**: 异步线程池、Spring Batch 批处理、消息队列消费者场景中，通过 `FrameworkContext.capture()` 捕获快照，并使用 `try (ContextScope scope = FrameworkContext.openScope(snapshot))` 进行受控执行与自动资源释放。
+3. **防内存泄漏与越权串号**: Web 请求出口处由最高优先级过滤器（`FrameworkContextClearFilter`）在 `finally` 阶段兜底清空所有上下文。
+
+### 3.4 严格工具类单数命名规范
+1. **统一标准**: 框架所有工具类一律采用单数命名：`JsonUtil`、`IdUtil`、`DateUtil`、`StringUtil`、`DigestUtil`、`BeanUtil`、`PropUtil`。
+2. **零容忍**: 严禁新建任何 `*Utils` 复数类，所有历史复数类已物理清理。
