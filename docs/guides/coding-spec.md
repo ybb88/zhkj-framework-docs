@@ -1,6 +1,7 @@
 # ZHKJ Framework 开发者编码规范与技术红线
 
-> **文档定位**: 统一全团队编码习惯、杜绝历史异味反模式、保障代码质量与现代 Java 工业级标准对齐。
+> **文档定位**: 统一全团队编码习惯、杜绝历史异味反模式、保障代码质量与现代 Java 工业级标准对齐。  
+> **设计与创作者**: Jason.Yang（274107098@qq.com）  
 
 ---
 
@@ -13,12 +14,15 @@
    - 严禁在任何模块中声明 `public interface *Constant`；
    - 所有常量类强制采用 **`public final class` + `private Constructor`** 现代模式封装，杜绝类型污染与不安全继承。
 3. **严禁散落硬编码 HTTP 请求头与加密字符串**:
-   - 跨服务请求头统一引用 `HeaderConstant`（如 `HeaderConstant.TENANT_ID`、`HeaderConstant.AUTHORIZATION`）；
+   - 跨服务请求头统一引用 `HeaderConstant`（如 `HeaderConstant.X_TENANT_ID`、`HeaderConstant.AUTHORIZATION`）；
    - 链路追踪统一引用 `TraceConstant.TRACE_ID`；
    - 算法与密文前缀统一引用 `CryptoConstant`。
 4. **持久层国密加密与盲索引防漏**:
    - 严禁在业务 Service 中手写计算盲索引哈希（如手工调用 `generateIndex` 赋值）；
    - 必须通过 `@EncryptField` / `@BlindIndex` 配合 `ZhkjMetaObjectHandler` 自动注入，确保入库 100% 防漏。
+5. **Spring Boot 4 内部配置类注解规范**:
+   - 仅在 `AutoConfiguration.imports` 中作为顶级入口的类标注 `@AutoConfiguration`；
+   - 内部由主配置类通过 `@Import` 引入的子模块配置类，必须使用 `@Configuration(proxyBeanMethods = false)`，杜绝注解语义二义性并降低 CGLIB 代理开销。
 
 ---
 
@@ -66,7 +70,7 @@
 
 ## 🧵 4. 统一上下文传递规范 (`FrameworkContext`)
 
-在异步线程（`@Async`、线程池）、批处理（Spring Batch）或消息队列消费者中，必须安全透传上下文：
+严禁依赖隐式 `InheritableThreadLocal`（在线程池复用时极易产生串号与脏数据污染）。在异步线程（`@Async`、线程池）、批处理（Spring Batch）或消息队列消费者中，必须显式传递并受控释放上下文：
 
 ```java
 // 1. 在主线程捕获完整上下文快照

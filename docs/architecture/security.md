@@ -1,12 +1,13 @@
 # ZHKJ Framework 安全架构与全生命周期数据保护
 
-> **文档定位**: 系统安全防护、全生命周期数据加解密体系、JJWT 0.12+ 认证与 SSO 单点登录全景架构指南
+> **文档定位**: 系统安全防护、全生命周期数据加解密体系、JJWT 0.12+ 认证、统一 SSO 单点登录客户端与分布式锁防误删安全指南  
+> **设计与创作者**: Jason.Yang（274107098@qq.com）  
 
 ---
 
 ## 🛡️ 1. 数据安全全生命周期三层防护模型
 
-框架在业界首创并落地了**全生命周期三层数据安全防护模型**，将隐私数据从“配置文件 $\rightarrow$ 网络传输/前端展示 $\rightarrow$ 数据库持久存储与检索”实施闭环管控：
+框架在业界首创并落地了**全生命周期三层数据安全防护模型**，将隐私数据从“配置文件 $\rightarrow$ 网络传输/前端展示 $\rightarrow$ 数据库持久存储与检索”实施全流程闭环管控：
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -98,69 +99,49 @@ public class Customer extends MybatisTenantEntity {
     private String customerName;
 
     /**
-     * 敏感字段：入库透明使用 SM4-CBC/AES 算法加密，读取透明还原为明文
+     * 手机号敏感字段 (国密 SM4 存储加密)
      */
-    @TableField(typeHandler = EncryptTypeHandler.class)
     @EncryptField(blindIndexField = "mobileHash")
+    @TableField(typeHandler = EncryptTypeHandler.class)
     private String mobile;
 
     /**
-     * 盲索引列：HMAC-SM3 加盐不可逆哈希，由 ZhkjMetaObjectHandler 自动注入，专用于 SQL 等值查询
+     * 手机号盲索引哈希列 (HMAC-SM3 国密加盐哈希)
      */
-    @TableField("mobile_hash")
+    @BlindIndex(source = "mobile")
     private String mobileHash;
 }
 ```
 
-业务查询时仅需针对哈希辅助列进行等值检索：
+**业务检索实战**：
 ```java
-public Customer getByMobile(String mobile) {
-    // 根据明文生成国密 HMAC-SM3 哈希
-    String mobileHash = BlindIndexUtil.generateIndex(mobile);
-    return customerMapper.selectOne(
-        new LambdaQueryWrapper<Customer>()
-            .eq(Customer::getMobileHash, mobileHash)
-    );
-}
+// 业务层根据明文查询时，仅需计算一次盲索引哈希后等值匹配辅助列：
+String queryMobile = "13800138000";
+String queryHash = BlindIndexUtil.generateIndex(queryMobile);
+
+List<Customer> list = customerMapper.selectList(
+    Wrappers.<Customer>lambdaQuery().eq(Customer::getMobileHash, queryHash)
+);
 ```
 
 ---
 
-## 🔑 3. 认证授权与统一单点登录 (SSO)
+## 🔑 3. 统一 SSO 单点登录客户端 (`starter-sso-client`)
 
-### 3.1 轻量无状态认证 (`starter-secure`)
-- **现代化 JJWT 0.12+ 验签**:
-  彻底废弃旧版 `setSigningKey`，统一采用流式语法验签：
-  ```java
-  SecretKey key = Keys.hmacShaKeyFor(signKey.getBytes(StandardCharsets.UTF_8));
-  Claims claims = Jwts.parser()
-          .verifyWith(key)
-          .build()
-          .parseSignedClaims(token)
-          .getPayload();
-  ```
-- **方法级细粒度权限控制 (`@PreAuth`)**:
-  ```java
-  @RestController
-  @RequestMapping("/api/v1/cases")
-  public class CaseController {
-
-      @PostMapping("/assign")
-      @PreAuth("hasRole('admin') or hasPermission('case:assign')")
-      public R<Void> assignCase(@RequestBody CaseAssignDto dto) {
-          return R.success("案件分配成功");
-      }
-  }
-  ```
-- **运维端点自动化保护 (`ActuatorSecurityConfiguration`)**:
-  当类路径中引入 Spring Security 时，自动对 `/actuator/prometheus`、`/actuator/health` 放行，其余敏感监控端点强制开启 Basic 认证保护。
+### 3.1 核心防护机制
+1. **URI 安全清洗防绕过**：
+   `SsoClientFilter` 与 `SsoGatewayGlobalFilter` 在白名单匹配前，统一调用 `StringUtils.cleanPath(uri)` 进行规范化，有效防止利用多重斜杠（`//admin`）、分号矩阵参数（`/api;jsessionid=...`）或相对路径符号绕过鉴权。
+2. **零反射用户模型归一化**：
+   SSO 解析所得的 `SsoUserContext` 物理继承自框架核心 `ZhkjUser`，在过滤器层面直接装配到 `SecurityContextHolder` 与 `FrameworkContext`，杜绝任何反射开销与跨系统模型割裂。
+3. **双 Token 静默续期与 Cookie/Header 自由切换**：
+   开箱支持浏览器 Cookie 模式与微服务 Header 模式（`Zhkj-Auth` / `Authorization`），支持通过 RefreshToken 自动静默换取新 Token。
 
 ---
 
-### 3.2 统一单点登录客户端与多上下文自愈 (`starter-sso-client`)
-1. **登录重定向与无感换票**:
-   未登录请求自动拦截重定向至统一认证收银台；持有授权码（`code`）的请求无感调用认证服务端换取 Access Token。
-2. **多上下文双向自愈规约**:
-   `SsoClientFilter` 在构造 `SsoUserContext` 时，**必须同步组装并存入 `SecurityContextHolder.setUser(...)`**，并自动提取当前用户的租户 ID 桥接至 `TenantContext`，彻底杜绝多系统间上下文缺失。
-3. **线程资源彻底释放**:
-   在请求结束的 `finally` 阶段，通过最高优先级的 `FrameworkContextClearFilter` 兜底清理 `SsoContextHolder`、`SecurityContextHolder` 与 `TenantContext`，杜绝 Tomcat 线程复用串号污染。
+## 🔒 4. 高可靠分布式锁防御 (`starter-redis`)
+
+在分布式并发场景下，锁的安全性不仅在于“能否获取锁”，更在于“能否安全释放锁”：
+1. **持有者校验（Owner Check）防误删**：
+   底层通过 Lua 脚本执行释放：只有锁中存储的唯一 Value 与当前线程持有的锁标识完全一致时才执行 `DEL`，彻底防止因任务执行耗时超过租期时误释放其他节点的锁。
+2. **强类型异常体系与优雅降级**：
+   加锁失败抛出的 `DistributedLockException` 严格继承自 `BaseFrameworkException`，由全局异常处理器拦截转换为受控的 `400 Bad Request / 业务失败响应`，绝不向前端暴露未受控的 500 系统崩溃。
