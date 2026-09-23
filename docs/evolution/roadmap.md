@@ -28,6 +28,7 @@
 - [x] 通用单点登录客户端 SDK 研制（`starter-sso-client`：URI 白名单 `cleanPath` 安全清洗防绕过、OAuth2 授权码自动换 Token、Cookie/Header 双向映射、`SsoUserContext` 归一化继承 `ZhkjUser`）
 - [x] 生产级声明式分布式锁切面与注解 `@DistributedLock`（`starter-redis`：Lua 脚本持有者 Owner 校验防误删、SpEL 动态 Key、抢锁失败强类型映射为 `BaseFrameworkException` 受控 400 响应）
 - [x] MyBatis-Plus 拦截器严格拓扑编排（强制保持 `Tenant -> DataScope -> Pagination` 执行顺序，彻底杜绝动态注册竞态）
+- [x] 全工程系统性架构治理与安全硬伤排查闭环（拔除 `starter-crypto` 业务代号渗透；SM2/Redis 字符集跨平台 UTF-8 锁死；`SqlKeyword` 静态预编译正则根治 GC 堆抖动；Kafka `failure` 异常状态双清理堵死上下文挂起；全框架 30+ 工具类 `final` 与私有构造器加固；`StringPool` 升级为标准类；双工程 27 模块全绿验收）
 
 ### 3. 全链路可观测性与上下文闭环
 - [x] 全链路分布式 TraceId 隐式自动染色与透传闭环（`core` 的 `TraceUtil` + `starter-web` 的 `TraceIdFilter` / `MdcTaskDecorator` + `starter-http` 的 `HttpClientHeaderInterceptor` + `starter-kafka` 的 `ZhkjKafka` / `KafkaTraceRecordInterceptor`）

@@ -123,3 +123,15 @@ $$\mathbf{TenantLineInnerInterceptor} \longrightarrow \mathbf{MybatisDataScopeIn
 ### 3.5 严格工具类单数命名规范
 1. **统一标准**: 框架所有工具类一律采用单数命名：`JsonUtil`、`IdUtil`、`DateUtil`、`StringUtil`、`DigestUtil`、`BeanUtil`、`PropUtil`。
 2. **零容忍**: 严禁新建任何 `*Utils` 复数类，所有历史复数类已物理清理。
+
+### 3.6 零业务概念反向渗透 (Zero Business Penetration)
+1. **纯粹 SPI 抽象**: 底层框架 `zhkj-framework` 严禁硬编码具体业务系统代号（如 `ncap`）、具体催收表名或业务字段（如 `case_no`）。
+2. **契约外置**: 任何业务定制点（如部门祖先拓扑计算、加密算法实现、租户规则），必须且只能通过 SPI 抽象接口（如 `DeptAncestorProvider`、`CryptoAlgorithmProvider`）由上层业务微服务实现并注入。
+
+### 3.7 高频路径 GC 防护与正则预编译
+1. **零动态正则编译**: 严禁在 MyBatis AST 拦截器、动态 SQL 构建或查询主链路中使用动态拼接并重新编译的正则表达式（如动态 `param.replaceAll("(?i)" + regex, "")`）。
+2. **静态常量复用**: 必须统一提取为 `private static final Pattern` 预编译常量，消除在高并发催收跑批作业下的 Minor GC 堆内存抖动。
+
+### 3.8 工具类架构级防御 (Sealed Utility Defense)
+1. **不可继承与私有构造器**: 全框架所有工具类必须声明为 `public final class`，并显式提供私有构造器 `private XxxUtil() {}`，防范外部反射或实例化破坏。
+2. **常量池类封装**: `StringPool` 与 `CharPool` 统一采用带私有构造器的 `public final class`，彻底根除常量接口（Constant Interface）反模式。

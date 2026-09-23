@@ -2,6 +2,7 @@
 
 * 📐 **系统架构与设计体系**
   * [架构总览与分层设计](architecture/overview.md)
+  * [2026 全项目重构作战全景图](architecture/zhkj-framework-refactor-blueprint.md)
   * [数据全生命周期安全体系](architecture/security.md)
   * [多租户隔离与数据权限体系](architecture/data-isolation.md)
 

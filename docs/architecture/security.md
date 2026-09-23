@@ -30,9 +30,9 @@
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 3. 存储与检索态 (Persistence & Storage Layer)                           │
 │    - 密文落盘: 实体敏感字段通过 EncryptTypeHandler (SM4/AES) 透明加密入库│
+│      具备事务安全阻断机制，加密失败严禁降级明文，坚决抛出 CryptoException│
 │    - 盲索引检索: 敏感字段配套生成 HMAC-SM3 加盐哈希盲索引辅助列 (*_hash)│
-│      由 ZhkjMetaObjectHandler 在新增/更新时自动注入，支持数据库密文      │
-│      精准检索与前后缀分词模糊检索，彻底杜绝明文脱库。                    │
+│      由 ZhkjMetaObjectHandler 在新增/更新时自动注入，强一致散列防漂移。   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -124,17 +124,35 @@ List<Customer> list = customerMapper.selectList(
 );
 ```
 
+#### 2.3.1 加解密安全阻断与合规铁律
+> [!CAUTION]
+> **绝对禁止降级明文存储**：底层 `StorageCryptoEngine` 在执行敏感字段加密时具备硬性事务阻断机制。一旦发生任何加密异常（如密钥未就绪、算法提供者异常），坚决抛出 `CryptoException` 强制中断持久化事务并回滚，绝不向数据库降级写入任何明文数据，严防明文脱库合规事故。
+
+#### 2.3.2 盲索引强一致性哈希与防哈希漂移
+> [!IMPORTANT]
+> **强一致散列与异常阻断**：
+> 1. **动态探测与算法自愈**：盲索引哈希由 `BlindIndexUtil.generateIndex(plainText)` 驱动，启动期动态嗅探运行环境优先采用国密 `HmacSM3`（在无 BouncyCastle 依赖的轻量环境平滑降级为 `HmacSHA256`）。
+> 2. **杜绝哈希漂移**：散列计算过程若遭遇不可恢复异常，直接抛出 `IllegalStateException` 阻断写入，绝不使用随机或缺省值回退，杜绝同一敏感数据在不同集群节点或时间点生成不一致散列串导致的历史数据检索失效与死数据。
+> 3. **检索语法约束**：盲索引列仅支持确定性精确等值匹配（`EQ` 或 `IN`），严禁使用 `LIKE '%...%'` 进行模糊检索。
+
 ---
 
-## 🔑 3. 统一 SSO 单点登录客户端 (`starter-sso-client`)
+## 🔑 3. 统一 SSO 单点登录与安全上下文 (`starter-sso-client` / `starter-secure`)
 
 ### 3.1 核心防护机制
 1. **URI 安全清洗防绕过**：
-   `SsoClientFilter` 与 `SsoGatewayGlobalFilter` 在白名单匹配前，统一调用 `StringUtils.cleanPath(uri)` 进行规范化，有效防止利用多重斜杠（`//admin`）、分号矩阵参数（`/api;jsessionid=...`）或相对路径符号绕过鉴权。
+   `SsoClientFilter` 与 `SsoGatewayGlobalFilter` 在白名单匹配前，统一调用 `StringUtil.cleanPath(uri)` 进行规范化，有效防止利用多重斜杠（`//admin`）、分号矩阵参数（`/api;jsessionid=...`）或相对路径符号绕过鉴权。
 2. **零反射用户模型归一化**：
    SSO 解析所得的 `SsoUserContext` 物理继承自框架核心 `ZhkjUser`，在过滤器层面直接装配到 `SecurityContextHolder` 与 `FrameworkContext`，杜绝任何反射开销与跨系统模型割裂。
 3. **双 Token 静默续期与 Cookie/Header 自由切换**：
    开箱支持浏览器 Cookie 模式与微服务 Header 模式（`Zhkj-Auth` / `Authorization`），支持通过 RefreshToken 自动静默换取新 Token。
+
+### 3.2 安全上下文透传与生命周期治理 (`SecurityContextHolder`)
+> [!NOTE]
+> **基于标准 ThreadLocal 纳管生命周期**：
+> - **存储基石**：`SecurityContextHolder` 基于标准 `ThreadLocal<ZhkjUser>` 维护当前线程的用户身份，严禁使用原生 `InheritableThreadLocal` 避免线程池复用时的线程上下文泄漏与租户身份错乱。
+> - **自动清理机制**：`SecurityContextHolder` 在静态块中自动注册到 `FrameworkContext` 清理链路（`FrameworkContext.registerCleaner(SecurityContextHolder::clear)`）。
+> - **跨线程全生命周期透传**：在 Web 过滤器（`SsoClientFilter`）与消息监听拦截器（`KafkaTraceRecordInterceptor`）中，统一通过 `FrameworkContext.capture()` 获取快照，并在异步线程池、Spring Batch 批处理中通过 `FrameworkContext.openScope(snapshot)` / `runWith(...)` 建立安全作用域，执行完毕由 AutoCloseable 机制彻底清理，从根本上杜绝跨线程池污染。
 
 ---
 

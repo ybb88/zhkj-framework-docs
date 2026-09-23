@@ -23,6 +23,12 @@
 5. **Spring Boot 4 内部配置类注解规范**:
    - 仅在 `AutoConfiguration.imports` 中作为顶级入口的类标注 `@AutoConfiguration`；
    - 内部由主配置类通过 `@Import` 引入的子模块配置类，必须使用 `@Configuration(proxyBeanMethods = false)`，杜绝注解语义二义性并降低 CGLIB 代理开销。
+6. **零业务概念反向渗透 (Zero Business Penetration)**:
+   - 底层框架严禁硬编码具体业务系统代号（如 `ncap`）或具体业务字段，业务扩展点必须通过标准 SPI 接口（如 `DeptAncestorProvider`）暴露。
+7. **高频路径 GC 防护与预编译正则**:
+   - 严禁在 SQL 拦截器或查询主链路中动态拼接编译正则表达式；所有正则必须提取为 `private static final Pattern` 静态预编译常量复用，消除 Minor GC 堆内存抖动。
+8. **跨平台字符集锁死 (StandardCharsets.UTF_8)**:
+   - 涉及字节数组与字符串互转（加解密、网络、Redis 监听）时，必须显式指定 `StandardCharsets.UTF_8`，严禁依赖 JVM 默认编码引发 Windows/Linux 乱码。
 
 ---
 
@@ -41,7 +47,11 @@
 | **`BeanUtil`** | 高性能字节码 Bean 属性拷贝与 Map 互转 | ~~`BeanUtils`~~ |
 | **`PropUtil`** | 属性配置文件加载与读取 | ~~`PropsUtil`~~ |
 
-### 2.2 优先使用现代 Java 标准能力
+### 2.2 工具类架构级防御与不可实例化约束
+- **强制 `final` 修饰与私有构造器**: 全框架所有 `*Util` 类必须声明为 **`public final class`**，并显式提供私有构造器 `private XxxUtil() {}`，杜绝任何外部实例化或不安全继承。
+- **常量池类标准封装**: `StringPool` 与 `CharPool` 统一声明为带有私有构造器的 `public final class`，严禁以 `implements StringPool` 反模式使用。
+
+### 2.3 优先使用现代 Java 标准能力
 - **Base64**: 直接使用 JDK 8+ 原生 `java.util.Base64`，严禁新建浅包装类；
 - **时间格式化**: 使用 `DateUtil` 内置的常量与 `DateTimeFormatter`，严禁在并发环境使用非线程安全的 `SimpleDateFormat`。
 
@@ -84,3 +94,48 @@ executor.execute(() -> {
     } // 退出作用域时，所有上下文自动彻底释放，防止线程池复用污染
 });
 ```
+
+---
+
+## 🏛️ 5. 实体架构与泛型规范 (Entity Architecture & Generic Specification)
+
+### 5.1 泛型实体主键规范
+框架全面采用强类型泛型接口 `IEntity<ID extends Serializable>` 与 `IAuditEntity<ID extends Serializable>`，杜绝历史 `Object id` 弱类型设计与方法重载歧义。在实体继承时，严格遵循以下继承标准：
+
+1. **默认 Long 雪花算法主键（绝大多数业务实体）**：
+   - 直接继承 **`MybatisBaseEntity`**（内部已特化实现 `MybatisAuditEntity<Long>`，自动装配 `@TableId(type = IdType.ASSIGN_ID)`、审计字段与默认逻辑删除）。
+   - 示例：
+     ```java
+     @Data
+     @EqualsAndHashCode(callSuper = true)
+     @TableName("biz_order")
+     public class Order extends MybatisBaseEntity {
+         private String orderNo;
+         private BigDecimal amount;
+     }
+     ```
+2. **自定义主键类型（如 String 租户/机构编码、UUID 等）**：
+   - 继承 **`MybatisAuditEntity<ID>`**，并在泛型参数中明确指定主键类型（如 `String` 等）。
+   - 子类自行声明 `@TableId` 物理主键字段及具体生成策略。
+   - 示例：
+     ```java
+     @Data
+     @EqualsAndHashCode(callSuper = true)
+     @TableName("sys_tenant")
+     public class SysTenant extends MybatisAuditEntity<String> {
+         @TableId(type = IdType.INPUT)
+         private String id;
+         
+         private String tenantName;
+     }
+     ```
+
+### 5.2 维度标记接口正交解耦 (Orthogonal Dimension Markers)
+框架将实体能力划分为正交维度，`ILogicDeleteEntity<T>`、`ITenantEntity`、`IVersionEntity<T>` 均直接继承 `Serializable`，彻底从 `IEntity` 依赖树中解耦：
+- **设计原则**：维度标记接口与实体的物理主键类型无关，各维度职责完全正交。
+- **自由组装**：业务实体可根据自身持久化特征自由组合（例如仅需逻辑删除的实现 `ILogicDeleteEntity<Integer>`；多租户实体实现 `ITenantEntity`；需要乐观锁并发控制的实现 `IVersionEntity<Integer>`），杜绝由于单一根继承链导致的虚假继承和冗余方法重载。
+
+### 5.3 Jackson 3 架构纪律与序列化安全 (Rule 20)
+在实体层与框架通用层**严禁引入 `com.fasterxml.jackson.*` 注解**（如 `@JsonIgnore`、`@JsonProperty`、`@JsonSetter`）：
+- **架构根因**：OpenAPI / SpringDoc（基于 Jackson 2 内核）在扫描实体属性时，若基类与子类存在 `setId(Object)` 与 `setId(Long)` 双重定义，会抛出 `Conflicting setter definitions for property "id"` 异常。
+- **Javac 桥接解法**：通过泛型继承 `MybatisAuditEntity<ID>`，Javac 编译器在编译期会自动生成带有 `ACC_BRIDGE` / `ACC_SYNTHETIC` 标记的桥接字节码。SpringDoc、Swagger 以及 Jackson 3 会自动忽略合成桥接方法，仅识别唯一的强类型 setter，既保证了实体层遵循纯粹的 Jackson 3 体系（Rule 20），又从底层天然规避了任何第三方文档/序列化工具的 Setter 冲突。

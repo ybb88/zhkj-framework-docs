@@ -88,3 +88,15 @@
 - **决策**:
   1. 根 POM `<dependencies>` 仅保留 `lombok` 与 `spring-boot-configuration-processor`；
   2. 所有第三方依赖版本统一定义在根 POM 的 `<properties>` 与 `<dependencyManagement>`，18 个子模块严格遵循零硬编码版本，杜绝版本碎片化。
+
+---
+
+### ADR-008: 全工程系统性架构治理、零业务渗透、GC 性能与上下文内存安全加固 (2026.4.1.0-SNAPSHOT)
+- **状态**: 已落地 (Accepted & Implemented)
+- **背景**: 在框架 18 模块全景排查中识别出 5 项高危架构硬伤与多项技术债务：加解密种子硬编码业务代号 `zhkj-ncap`、SM2/Redis 字符集依赖平台编码引发乱码、SqlKeyword 每次查询动态编译正则造成 Minor GC 抖动、Kafka 单条消费异常未清理上下文、MybatisDataScopeInterceptor ThreadLocal 内存挂起，以及全工程工具类缺少 private 构造器防线。
+- **决策**:
+  1. **零业务反向渗透**: 拔除 `starter-crypto` 中硬编码的 `zhkj-ncap` 种子，升级为框架级中立密钥；
+  2. **字符集跨平台锁死**: `SM2Util` 与 Redis 监听器强制显式指定 `StandardCharsets.UTF_8`，杜绝跨环境验签与解密失败；
+  3. **高频路径 GC 防护**: `SqlKeyword` 正则表达式重构为静态预编译 `Pattern` 复用，消除批量查询下的堆抖动；
+  4. **上下文全生命周期闭环**: `KafkaTraceRecordInterceptor` 补齐 `failure` 异常清理回调；`MybatisDataScopeInterceptor` 消除 ThreadLocal 悬挂并引入 `ObjectProvider` 依赖注入优化；
+  5. **工程防御加固**: 全框架 30 余个工具类统一补全 `public final class` 与私有防实例化构造器；`StringPool`/`CharPool` 彻底由 interface 升级为标准 final class；清理历史冗余类并平滑过渡。
