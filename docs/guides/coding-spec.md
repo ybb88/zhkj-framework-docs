@@ -29,6 +29,9 @@
    - 严禁在 SQL 拦截器或查询主链路中动态拼接编译正则表达式；所有正则必须提取为 `private static final Pattern` 静态预编译常量复用，消除 Minor GC 堆内存抖动。
 8. **跨平台字符集锁死 (StandardCharsets.UTF_8)**:
    - 涉及字节数组与字符串互转（加解密、网络、Redis 监听）时，必须显式指定 `StandardCharsets.UTF_8`，严禁依赖 JVM 默认编码引发 Windows/Linux 乱码。
+9. **绝对禁止代码行内全限定类名 (Anti-FQCN Rule - 绝对铁律)**:
+   - 严禁在类成员变量、局部变量、方法参数、返回值、强制类型转换、静态方法调用或注解声明中使用带包名的全路径（如 `@org.springframework...`、`com.zhkj...`、`java.util.Base64` 等）；
+   - **所有依赖项必须且只能在文件头部（package 声明下方）集中统一显式 `import`**，保持代码现代工业级整洁度。
 
 ---
 
@@ -43,7 +46,7 @@
 | **`IdUtil`** | UUID、雪花算法 ID、序号生成器 | ~~`IdUtils`~~ |
 | **`DateUtil`** | Java 8 日期时间、经典 Date 格式化 | ~~`DateTimeUtil`~~, ~~`ConcurrentDateFormat`~~ |
 | **`StringUtil`** | 字符串判空、占位符替换、驼峰下划线互转 | ~~`StringUtils`~~ |
-| **`DigestUtil`** | MD5、SHA256、国密 SM3 消息摘要 | ~~`DigestUtils`~~ |
+| **`DigestUtil`** | MD5、SHA256、国密 SM3 消息摘要 (支持 String 与 byte[] 字节流) | ~~`DigestUtils`~~ |
 | **`BeanUtil`** | 高性能字节码 Bean 属性拷贝与 Map 互转 | ~~`BeanUtils`~~ |
 | **`PropUtil`** | 属性配置文件加载与读取 | ~~`PropsUtil`~~ |
 
