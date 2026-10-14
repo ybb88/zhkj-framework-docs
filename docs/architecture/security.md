@@ -85,6 +85,40 @@ public class CustomerVo {
 }
 ```
 
+#### 2.2.1 内部微服务 RPC 脱敏旁路放行机制 (`InternalRpcDesensitizeFilter`)
+> [!IMPORTANT]
+> **业务痛点与旁路需求**：
+> 在微服务体系中，部分接口既要供前端管理后台查询展示（必须打码脱敏防隐私泄漏），又要被内部其他微服务通过声明式 RPC 客户端（`@HttpExchange`）调用获取真实数据（如催收作业中心调度外呼拨号、批处理跑批计息、短信平台下发短信）。如果 RPC 获取到的是打码后的 `138****8000`，将直接导致外呼失败或严重业务事故。
+
+框架在 `zhkj-framework-starter-web` 中内置了高优先级过滤器 `InternalRpcDesensitizeFilter`（Ordered: `HIGHEST_PRECEDENCE + 20`）：
+1. **触发契约**：调用方在发起 HTTP/RPC 请求时携带标准请求头：
+   ```http
+   X-Internal-RPC: true
+   ```
+   常量定义于 `HeaderConstant.X_INTERNAL_RPC`。
+2. **执行流程**：
+   ```
+   微服务发起 RPC (Header: X-Internal-RPC: true)
+                     │
+                     ▼
+   InternalRpcDesensitizeFilter (探测到内部调用标识)
+                     │
+                     ▼
+   DesensitizeContext.disable() (线程作用域内临时关闭脱敏打码)
+                     │
+                     ▼
+   Controller 业务逻辑执行 & Jackson 序列化输出真实明文
+                     │
+                     ▼
+   finally { DesensitizeContext.enable(); } (立即恢复脱敏开关)
+                     │
+                     ▼
+   FrameworkContextClearFilter (请求出口处强制清空所有上下文兜底)
+   ```
+3. **零线程污染保障**：
+   - 过滤器在 `finally` 块中立即恢复脱敏开关；
+   - 无论业务执行成功还是发生异常，外层 `FrameworkContextClearFilter` 都会对 `DesensitizeContext` 执行彻底清空（`clear()`），杜绝在 Web 常驻线程池复用时发生串号或脱敏失效。
+
 ---
 
 ### 2.3 存储态：国密密文落盘与盲索引自动注入 (`starter-mybatis`)

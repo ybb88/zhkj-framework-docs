@@ -15,7 +15,7 @@
 - [x] 数据访问统一抽象设计（建立 `zhkj-framework-data-api`，定义 `IAuditEntity` / `ITenantEntity` / `PojoBaseEntity`）
 - [x] 声明式 HTTP 客户端演进（彻底废弃已停滞维护的 OpenFeign，全面采用 Spring 6+ HTTP Interfaces `@HttpExchange`，独立收敛为 `zhkj-framework-starter-http`）
 - [x] 现代化技术栈全面治理（Spring 7 / Spring Boot 4.1.1 / Spring Batch 6.0.5 API 治理，消除全部过时与废弃编译器警告）
-- [x] 数据安全与全生命周期加解密（`starter-crypto` 统一提供 Spring Boot 4 `EnvironmentPostProcessor` 配置解密、Jackson 动态脱敏、MyBatis `EncryptTypeHandler` 字段透明存储加密与 HMAC-SM3 盲索引模糊检索）
+- [x] 数据安全与全生命周期加解密（`starter-crypto` 统一提供 Spring Boot 4 `EnvironmentPostProcessor` 配置解密、Jackson 动态脱敏、MyBatis `EncryptTypeHandler` 字段透明存储加密与 HMAC-SM3 盲索引等值检索）
 - [x] Nacos 模块彻底解耦与 Jasypt 下线（移除所有旧 Jasypt 与 RSA 配置加密逻辑，Nacos 专注服务治理与配置同步）
 - [x] 全工程代码瘦身与规范工具类单数命名（删除历史 `base64/` 复制源码及空工具类，新增 `JsonUtil`、`IdUtil`、`DigestUtil`，消除常量继承反模式）
 - [x] 全模块 Jackson 3 原生现代化升级（`tools.jackson.core:jackson-databind` 3.x 深度重构，废弃类与方法全面替代）
@@ -29,6 +29,8 @@
 - [x] 生产级声明式分布式锁切面与注解 `@DistributedLock`（`starter-redis`：Lua 脚本持有者 Owner 校验防误删、SpEL 动态 Key、抢锁失败强类型映射为 `BaseFrameworkException` 受控 400 响应）
 - [x] MyBatis-Plus 拦截器严格拓扑编排（强制保持 `Tenant -> DataScope -> Pagination` 执行顺序，彻底杜绝动态注册竞态）
 - [x] 全工程系统性架构治理与安全硬伤排查闭环（拔除 `starter-crypto` 业务代号渗透；SM2/Redis 字符集跨平台 UTF-8 锁死；`SqlKeyword` 静态预编译正则根治 GC 堆抖动；Kafka `failure` 异常状态双清理堵死上下文挂起；全框架 30+ 工具类 `final` 与私有构造器加固；`StringPool` 升级为标准类；双工程 27 模块全绿验收）
+- [x] 微服务内部 RPC 脱敏旁路放行机制落地（`starter-web` 新增 `InternalRpcDesensitizeFilter`，自动识别 `X-Internal-RPC: true` 并配合 `DesensitizeContext` 临时旁路 Jackson 脱敏，finally 恢复与清理，打通服务间协同调用真实数据流）
+- [x] 全架构 Anti-FQCN 纯净化与摘要算法字节流扩充（确立行内零全限定类名绝对红线；`DigestUtil` 原生支持 `sha256(byte[])` 二进制散列）
 
 ### 3. 全链路可观测性与上下文闭环
 - [x] 全链路分布式 TraceId 隐式自动染色与透传闭环（`core` 的 `TraceUtil` + `starter-web` 的 `TraceIdFilter` / `MdcTaskDecorator` + `starter-http` 的 `HttpClientHeaderInterceptor` + `starter-kafka` 的 `ZhkjKafka` / `KafkaTraceRecordInterceptor`）

@@ -75,11 +75,11 @@
 
 | 层次 | 模块名 (`artifactId`) | 职责定位 | 核心类与契约 |
 | :--- | :--- | :--- | :--- |
-| **核心层** | `zhkj-framework-core` | 通用工具箱、协议模型、统一上下文门面、脱敏规则 | `R<T>`, `FrameworkContext`, `HeaderConstant`, `DateUtil`, `JsonUtil` |
+| **核心层** | `zhkj-framework-core` | 通用工具箱、协议模型、统一上下文门面、脱敏规则、盲索引计算 | `R<T>`, `FrameworkContext`, `HeaderConstant`, `DateUtil`, `JsonUtil`, `DigestUtil`, `BlindIndexUtil` |
 | **核心层** | `zhkj-framework-launcher` | 微服务/单体统一引导启动器、环境探测、耗时分析 | `ZhkjApplication`, `LauncherService`, `PropUtil` |
 | **数据抽象** | `zhkj-framework-data-api` | 框架无关持久化契约、审计模型、数据源 SPI | `IAuditEntity`, `ITenantEntity`, `PojoBaseEntity`, `DataSourceProvider` |
 | **通信层** | `zhkj-framework-starter-http` | 声明式 HTTP 客户端、全链路 Header 透传、优雅降级 | `@EnableHttpClients`, `@HttpExchange`, `HttpClientHeaderInterceptor` |
-| **Web层** | `zhkj-framework-starter-web` | 统一响应切面、全局异常处理、XSS 规整防护、TraceId | `DefaultErrorController`, `XssFilter`, `TraceFilter`, `WebUtil` |
+| **Web层** | `zhkj-framework-starter-web` | 统一响应切面、全局异常处理、XSS 规整防护、TraceId、内部 RPC 脱敏旁路 | `DefaultErrorController`, `XssFilter`, `TraceFilter`, `InternalRpcDesensitizeFilter`, `WebUtil` |
 | **持久层** | `zhkj-framework-starter-mybatis` | MyBatis-Plus 增强、自动审计填充、国密存储加密与盲索引 | `ZhkjMetaObjectHandler`, `MybatisTenantEntity`, `EncryptTypeHandler` |
 | **持久层** | `zhkj-framework-starter-jpa` | Spring Data JPA 增强、Hibernate 租户 Filter 适配 | `JpaTenantAutoConfiguration`, `JpaTenantEntity`, `JpaBaseEntity` |
 | **持久层** | `zhkj-framework-starter-datasource` | 动态多数据源路由、Hikari 连接池生命周期管理 | `DynamicDataSource`, `@DS`, `DynamicRoutingDataSource` |
@@ -87,7 +87,7 @@
 | **数据治理** | `zhkj-framework-starter-datascope` | 细粒度数据权限注解与 AST 树动态重写 SPI | `@DataAuth`, `ScopeModel`, `ScopeModelHandler`, `DeptAncestorProvider` |
 | **安全技术** | `zhkj-framework-starter-secure` | 无状态令牌鉴权、方法级权限、Actuator 安全保护 | `SecureUtil`, `@PreAuth`, `ActuatorSecurityConfiguration`, `AuthAspect` |
 | **安全技术** | `zhkj-framework-starter-sso-client` | 统一单点登录客户端、OAuth 2.1 换 Token、URI 规整防绕过 | `SsoClientFilter`, `SsoContextHolder`, `SsoUserContext` |
-| **安全技术** | `zhkj-framework-starter-crypto` | 引导期配置解密 ENC(...)、持久层国密加密与盲索引引擎 | `EncryptablePropertyEnvironmentPostProcessor`, `BlindIndexUtil`, `SM4Util` |
+| **安全技术** | `zhkj-framework-starter-crypto` | 引导期配置解密 ENC(...)、持久层国密加密引擎与盲索引注解声明 | `EncryptablePropertyEnvironmentPostProcessor`, `@EncryptField`, `@BlindIndex`, `StorageCryptoEngine`, `SM4Util` |
 | **中间件** | `zhkj-framework-starter-redis` | 分布式缓存管理器、声明式分布式锁、持有者校验 | `RedisAutoCacheManager`, `DistributedLockAspect`, `RedisSerializer.json()` |
 | **中间件** | `zhkj-framework-starter-kafka` | 消息队列收发统一发布订阅契约、上下文双向透传与清理 | `ZhkjKafka`, `KafkaContextProducerInterceptor`, `KafkaTraceRecordInterceptor` |
 | **中间件** | `zhkj-framework-starter-nacos` | Nacos 注册发现与配置动态热更新 | `ZhkjNacosAutoConfiguration`, `NacosProperties` |
@@ -135,3 +135,12 @@ $$\mathbf{TenantLineInnerInterceptor} \longrightarrow \mathbf{MybatisDataScopeIn
 ### 3.8 工具类架构级防御 (Sealed Utility Defense)
 1. **不可继承与私有构造器**: 全框架所有工具类必须声明为 `public final class`，并显式提供私有构造器 `private XxxUtil() {}`，防范外部反射或实例化破坏。
 2. **常量池类封装**: `StringPool` 与 `CharPool` 统一采用带私有构造器的 `public final class`，彻底根除常量接口（Constant Interface）反模式。
+
+### 3.9 绝对禁止代码行内全限定类名 (Anti-FQCN 绝对铁律)
+1. **统一导包**: 严禁在类成员变量、局部变量、方法入参、返回值、泛型、强转或注解声明中使用带包路径的行内全限定类名（如 `@org.springframework...`、`java.util.Base64` 等）。
+2. **规范治理**: 所有依赖必须且只能在源码头部集中统一显式 `import`，代码正文中仅保留纯类名，保障代码整洁度与高可维护性。
+
+### 3.10 内部微服务 RPC 脱敏旁路放行机制
+1. **旁路契约**: 声明式 HTTP 客户端跨服务 RPC 调用时携带 `X-Internal-RPC: true` 请求头（常量 `HeaderConstant.X_INTERNAL_RPC`）。
+2. **作用域受控放行**: `starter-web` 内置的 `InternalRpcDesensitizeFilter` 在接收到此标头时在线程当前作用域内调用 `DesensitizeContext.disable()`，使 Controller 响应输出真实明文字段供内部协同（如外呼、计息、短信），在 `finally` 中立即恢复并由 `FrameworkContextClearFilter` 兜底彻底清空，兼顾前端展示合规脱敏与内部通信数据准确。
+

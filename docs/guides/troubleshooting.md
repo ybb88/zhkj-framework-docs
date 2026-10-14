@@ -1,11 +1,11 @@
 # ZHKJ Framework 常见问题与排错手册 (Troubleshooting FAQ)
 
-> **文档定位**: 汇总在微服务开发、多模块编译、多租户隔离、批处理、分布式锁及安全环境初始化中最常见的 14 大异常报错与标准排查解决方案。  
+> **文档定位**: 汇总在微服务开发、多模块编译、多租户隔离、批处理、分布式锁、RPC 通信、代码规范及安全环境初始化中最常见的 16 大异常报错与标准排查解决方案。  
 > **核心架构师**: Jason.Yang（274107098@qq.com）  
 
 ---
 
-## 📋 常见故障与排查速查表 (14 大场景)
+## 📋 常见故障与排查速查表 (16 大场景)
 
 | 序号 | 错误现象 / 报错日志 | 根本原因剖析 | 标准排查与解决办法 |
 | :--- | :--- | :--- | :--- |
@@ -23,3 +23,5 @@
 | **12** | 获取分布式锁失败时前端收到 `500 Internal Server Error` | 使用了未继承框架统一异常体系的旧版分布式锁异常 | 升级至最新版框架，`DistributedLockException` 继承 `BaseFrameworkException`，由 `GlobalExceptionHandler` 统一映射为受控 400/业务失败响应。 |
 | **13** | 租户拦截器与数据权限拦截器顺序颠倒导致过滤异常 | 多个 Starter 动态注入拦截器引发链表首部插入竞态 | 框架最新架构已锁定编排拓扑：`Tenant -> DataScope -> Pagination`，租户物理隔离绝对处于第 0 位执行。 |
 | **14** | URL 白名单带多重斜杠（`//admin`）或分号参数绕过安全拦截 | 未在比对前对传入的 `request.getRequestURI()` 进行路径规范化清洗 | 框架已在 `SsoClientFilter`、`SsoGatewayGlobalFilter` 与 `XssFilter` 中全面集成 `StringUtil.cleanPath(uri)` 规范化防御，业务层开箱即用。 |
+| **15** | 微服务间 RPC 调用接收到的手机号/身份证被带星号脱敏打码（如 `138****8000`）导致下游外呼或算费失败 | 上游 Controller 响应时被 Jackson 展示态 `@Desensitize` 默认打码，未启用内部 RPC 旁路放行机制 | 在声明式 HTTP 客户端或微服务间 RPC 请求时携带 `X-Internal-RPC: true` 请求头（常量定义于 `HeaderConstant.X_INTERNAL_RPC`），底层 `InternalRpcDesensitizeFilter` 将在本次请求线程中临时关闭脱敏并输出真实明文，请求结束自动恢复并彻底清空。 |
+| **16** | 编译警告或代码审查指出在类中使用了行内全限定类名 (Anti-FQCN Rule violation) | 在类成员变量、局部变量、方法入参、返回值或注解中书写了长包名（如 `@org.springframework...`、`java.util.Base64`） | 遵循框架 Anti-FQCN 绝对铁律，严禁在正文中使用行内全限定类名，所有类名必须且只能在文件头部（package 声明下方）集中显式 `import` 纯类名。 |

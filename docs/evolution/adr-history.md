@@ -49,7 +49,7 @@
   1. 彻底移除 Jasypt 与 RSA，构建专属 `zhkj-framework-starter-crypto`；
   2. **配置态**: 基于 Boot 4 原生 `EnvironmentPostProcessor` 统一解密 `ENC(...)`；
   3. **展示态**: 统一 Jackson `@Desensitize` 动态打码（支持 10 种脱敏规则）；
-  4. **存储态**: 采用国密 SM4/AES 透明加密（`EncryptTypeHandler`）+ HMAC-SM3 加盐哈希盲索引列（`*_hash`），由 `ZhkjMetaObjectHandler` 自动计算注入，支持数据库密文精准等值检索与模糊检索。
+  4. **存储态**: 采用国密 SM4/AES 透明加密（`EncryptTypeHandler`）+ HMAC-SM3 加盐哈希盲索引列（`*_hash`），由 `ZhkjMetaObjectHandler` 自动计算注入，支持数据库密文精准等值检索（EQ/IN）。
 
 ---
 
@@ -100,3 +100,22 @@
   3. **高频路径 GC 防护**: `SqlKeyword` 正则表达式重构为静态预编译 `Pattern` 复用，消除批量查询下的堆抖动；
   4. **上下文全生命周期闭环**: `KafkaTraceRecordInterceptor` 补齐 `failure` 异常清理回调；`MybatisDataScopeInterceptor` 消除 ThreadLocal 悬挂并引入 `ObjectProvider` 依赖注入优化；
   5. **工程防御加固**: 全框架 30 余个工具类统一补全 `public final class` 与私有防实例化构造器；`StringPool`/`CharPool` 彻底由 interface 升级为标准 final class；清理历史冗余类并平滑过渡。
+
+---
+
+### ADR-009: 内部微服务 RPC 脱敏旁路放行机制与 Anti-FQCN 纯净化治理 (2026.4.1.0-SNAPSHOT)
+- **状态**: 已落地 (Accepted & Implemented)
+- **背景**:
+  1. **内部调用数据失真痛点**: 原框架展示态 `@Desensitize` 在 Controller 序列化输出时统一对手机号、身份证、银行卡等脱敏打码。但在微服务协同（声明式 RPC 客户端 `@HttpExchange`）场景下，下游系统（如催收作业中心调度外呼拨号、批处理计息跑批、短信服务发送通知）获取到打码的 `138****8000` 会直接引发业务功能熔断或数据污染；
+  2. **行内全限定类名反模式 (FQCN)**: 框架及下游业务中偶发出现行内书写长包名全类名（如 `@org.springframework...`、`java.util.Base64` 等），严重违背代码可读性与团队整洁架构规范；
+  3. **摘要算法字节流支持缺失**: `DigestUtil` 历史仅支持字符串入参的 `sha256(String)`，业务端在处理字节数组（二进制公私钥、证书、文件流）时被迫自行调用底层 Java 原生 API。
+- **决策**:
+  1. **内部微服务 RPC 脱敏旁路机制 (`InternalRpcDesensitizeFilter`)**:
+     - 在 `zhkj-framework-starter-web` 中实现并装配高优先级 `InternalRpcDesensitizeFilter`（Ordered: `HIGHEST_PRECEDENCE + 20`）；
+     - 当检测到 HTTP 请求携带 `X-Internal-RPC: true`（常量契约 `HeaderConstant.X_INTERNAL_RPC`）时，自动触发 `DesensitizeContext.disable()`，在本次请求线程中临时关闭 Jackson 脱敏打码，使内部 RPC 能够安全透传真实明文字段；
+     - 在 `finally` 块中立即恢复 `DesensitizeContext.enable()`，并由外层 `FrameworkContextClearFilter` 兜底彻底清空，确保常驻线程池复用绝对无串号与数据泄露隐患；
+  2. **Anti-FQCN 纯净化铁律**:
+     - 确立 Anti-FQCN 绝对红线：严禁在类成员、局部变量、方法入参、返回值、泛型、强转或注解声明中使用带包路径的内联全类名；所有依赖必须 100% 提取并在文件头部（package 声明下方）集中显式 `import` 纯类名；
+  3. **DigestUtil 字节流与多源摘要扩展**:
+     - 在 `zhkj-framework-core` 的 `DigestUtil` 中扩展 `sha256(byte[] data)` 及 `sha256Hex` 等重载，底层直接操作二进制字节流并指定 UTF-8 安全编码，杜绝中间字符转码开销与跨平台字符集漂移。
+
