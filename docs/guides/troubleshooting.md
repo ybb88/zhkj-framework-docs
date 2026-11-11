@@ -1,27 +1,28 @@
 # ZHKJ Framework 常见问题与排错手册 (Troubleshooting FAQ)
 
-> **文档定位**: 汇总在微服务开发、多模块编译、多租户隔离、批处理、分布式锁、RPC 通信、代码规范及安全环境初始化中最常见的 16 大异常报错与标准排查解决方案。  
+> **文档定位**: 汇总在微服务开发、多模块编译、多租户隔离、批处理、分布式锁、RPC 通信、代码规范及安全环境初始化中最常见的 17 类异常与标准排查方案。  
 > **核心架构师**: Jason.Yang（274107098@qq.com）  
 
 ---
 
-## 📋 常见故障与排查速查表 (16 大场景)
+## 📋 常见故障与排查速查表 (17 大场景)
 
 | 序号 | 错误现象 / 报错日志 | 根本原因剖析 | 标准排查与解决办法 |
 | :--- | :--- | :--- | :--- |
-| **1** | `TenantId cannot be null` 或多租户 SQL 过滤报错 | 业务未携带 Header 且 Token 中无租户信息，或异步线程中未注入租户上下文 | 1. 检查是否在 `zhkj.tenant.ignore-tables` 中配置了白名单；<br>2. 在异步线程/MQ/批处理中，使用 `FrameworkContext.capture()` 并在子线程 `try (var scope = FrameworkContext.openScope(snapshot))` 透传上下文。 |
-| **2** | `No ScopeModelHandler bean found` | 实体或 Mapper 使用了 `@DataAuth`，但 Spring 容器中未注入 `ScopeModelHandler` 实现 | 在业务应用中实现 `ScopeModelHandler` SPI 接口，并添加 `@Component` 注解注册为 Spring Bean。 |
+| **1** | `Tenant or tenantId cannot be null`（源码文案，`TenantRegistry.java:45`；与本条症状的对应关系 `[待确认]`）或多租户 SQL 过滤报错 | 业务未携带 Header 且 Token 中无租户信息，或异步线程中未注入租户上下文 | 1. 检查 `zhkj.tenant.mybatis.ignore-tables` 白名单配置（前缀为 `zhkj.tenant.mybatis`，字段 `ignoreTables` 见 `TenantFieldIsolationProperties.java:33`）；<br>2. 在异步线程/MQ/批处理中，使用 `FrameworkContext.capture()` 并在子线程 `try (ContextScope scope = FrameworkContext.openScope(snapshot))` 透传上下文。 |
+| **2** | `No ScopeModelHandler bean found`（`[待确认]`：该报错文案在源码中未找到；常见表现为 `@DataAuth` 数据权限未生效或 `ScopeModelHandler` 注入失败） | Mapper 使用了 `@DataAuth`（`io.github.ybb88.framework.datascope.annotation.DataAuth`），需要 `ScopeModelHandler`（`io.github.ybb88.framework.datascope.handler.ScopeModelHandler`）Bean 参与数据权限解析。框架在 `zhkj.datascope.enabled=true` 且 classpath 存在 `org.springframework.jdbc.core.JdbcTemplate` 时默认注册 `ZhkjScopeModelHandler`（`MybatisDataScopeAutoConfiguration.java:48-53`） | 1. 确认 `zhkj.datascope.enabled: true`；<br>2. 需要自定义解析逻辑时，在业务应用实现 `ScopeModelHandler` 并注册为 Spring Bean；默认 Bean 未加 `@ConditionalOnMissingBean`，与业务 Bean 并存时是否冲突 `[待确认]`；<br>3. 部门祖先解析可实现 `DeptAncestorProvider` SPI。 |
 | **3** | `ClassCastException` 在松散绑定阶段报错 (Spring Boot 4 启动阶段解密) | 自定义 `EnvironmentPostProcessor` 误将内部特殊属性源 `configurationProperties` 替换为普通包，或未重新挂载 | 1. 严禁包装 `ConfigurationPropertySourcesPropertySource`；<br>2. 包装完所有 PropertySource 后，**必须在末尾执行 `ConfigurationPropertySources.attach(environment)`**。 |
-| **4** | HTTP 跨服务接口调用报 `401 Unauthorized` | 声明式 HTTP 客户端调用时未自动透传认证 Header 或租户 Header | 确保调用方引入了 `zhkj-framework-starter-http`，并确认配置项 `zhkj.http.client.headers.enabled: true`。 |
-| **5** | Swagger / Knife4j 页面报 404 或无数据 | 接口文档静态资源或 API 文档端点被安全拦截器拦截 | 在 `application.yml` 的 `zhkj.secure.exclude-patterns` 中追加配置：<br>`/doc.html`, `/webjars/**`, `/v3/api-docs/**`。 |
-| **6** | `JobLocator is required` (Spring Batch 6) | Spring Batch 6 采用 `TaskExecutorJobOperator` 时必须显式提供 `JobRegistry` | 在批处理配置类中声明并注入：<br>`@Bean public JobRegistry jobRegistry() { return new MapJobRegistry(); }`。 |
+| **4** | HTTP 跨服务接口调用报 `401 Unauthorized` | 声明式 HTTP 客户端调用时未透传认证或租户 Header | 确认调用方引入了 `zhkj-framework-starter-http`，并确认 `zhkj.http.client.headers.enabled: true`（默认值为 `true`，若被覆盖则需恢复）。 |
+| **5** | Swagger / Knife4j 页面报 404 或无数据 | 接口文档静态资源或 API 文档端点未注册，或被安全拦截器拦截。框架 `GlobalExceptionHandler` 对 `NoResourceFoundException` / `NoHandlerFoundException` 统一返回 HTTP 404（`GlobalExceptionHandler.java:174-185`，`NOT_FOUND`），资源路径不存在时即表现为 404 | 1. 在 `application.yml` 的 `zhkj.secure.exclude-patterns` 中追加配置：<br>`/doc.html`, `/webjars/**`, `/v3/api-docs/**`；<br>2. 若为 404，核对 `zhkj-framework-starter-openapi` 是否在类路径中且未设置 `zhkj.openapi.enabled: false`（`OpenApiAutoConfiguration.java:60`）。 |
+| **6** | `JobLocator is required` (Spring Batch 6) | 业务工程使用 Spring Batch 时，`TaskExecutorJobOperator` 需要显式 `JobRegistry`（框架 pom 不引入 Spring Batch） | 在批处理配置类中声明并注入：<br>`@Bean public JobRegistry jobRegistry() { return new MapJobRegistry(); }`。 |
 | **7** | `非法字符: '\ufeff'` (编译期报错) | Windows PowerShell 脚本在生成/修改 Java 源码时写入了带 BOM 的 UTF-8 文件 | 严禁使用带 BOM 的 UTF-8。使用 Node.js (`utf8` 无 BOM) 或在 PowerShell 中通过 `New-Object System.Text.UTF8Encoding($false)` 重写文件。 |
-| **8** | OkHttp / RestClient SSL 握手异常或证书校验失败 | 内部测试或私有云环境使用了自签名证书 | 在配置文件中开启测试信任开关：<br>`zhkj.http.client.disable-ssl-validation: true`，底层会自动注入信任所有证书的 SSLContext。 |
-| **9** | `NoClassDefFoundError: R` 或方法签名不匹配 | Maven 多模块跨模块修改后，上游依赖未安装到本地仓库，本地存在增量编译脏类 | 执行 `mvn clean compile -pl <module> -am "-DskipTests=true"` 重新编译上游，或根目录执行 `mvn clean install "-DskipTests=true"` 刷新依赖。 |
-| **10** | `Spring MVC found on classpath, Spring Cloud Gateway requires WebFlux` | 网关工程误引入了依赖 Servlet/Tomcat 的 Starter | 响应式网关工程（基于 Spring Cloud Gateway WebFlux）只允许引入 `spring-cloud-starter-gateway-server-webflux`、`core`、`starter-nacos`，严禁引入 `starter-web`。 |
-| **11** | Windows 下本地开发调试报 `Fatal error compiling: ... 拒绝访问` | 本地 IDE (IDEA/VSCode) 正在运行/调试业务服务，锁定了框架 JAR 包文件句柄 | **严禁强行执行 `mvn clean`**，应直接使用 `mvn install "-DskipTests=true" "-Dgpg.skip=true"` 执行安全的增量覆盖编译。 |
-| **12** | 获取分布式锁失败时前端收到 `500 Internal Server Error` | 使用了未继承框架统一异常体系的旧版分布式锁异常 | 升级至最新版框架，`DistributedLockException` 继承 `BaseFrameworkException`，由 `GlobalExceptionHandler` 统一映射为受控 400/业务失败响应。 |
-| **13** | 租户拦截器与数据权限拦截器顺序颠倒导致过滤异常 | 多个 Starter 动态注入拦截器引发链表首部插入竞态 | 框架最新架构已锁定编排拓扑：`Tenant -> DataScope -> Pagination`，租户物理隔离绝对处于第 0 位执行。 |
-| **14** | URL 白名单带多重斜杠（`//admin`）或分号参数绕过安全拦截 | 未在比对前对传入的 `request.getRequestURI()` 进行路径规范化清洗 | 框架已在 `SsoClientFilter`、`SsoGatewayGlobalFilter` 与 `XssFilter` 中全面集成 `StringUtil.cleanPath(uri)` 规范化防御，业务层开箱即用。 |
-| **15** | 微服务间 RPC 调用接收到的手机号/身份证被带星号脱敏打码（如 `138****8000`）导致下游外呼或算费失败 | 上游 Controller 响应时被 Jackson 展示态 `@Desensitize` 默认打码，未启用内部 RPC 旁路放行机制 | 在声明式 HTTP 客户端或微服务间 RPC 请求时携带 `X-Internal-RPC: true` 请求头（常量定义于 `HeaderConstant.X_INTERNAL_RPC`），底层 `InternalRpcDesensitizeFilter` 将在本次请求线程中临时关闭脱敏并输出真实明文，请求结束自动恢复并彻底清空。 |
-| **16** | 编译警告或代码审查指出在类中使用了行内全限定类名 (Anti-FQCN Rule violation) | 在类成员变量、局部变量、方法入参、返回值或注解中书写了长包名（如 `@org.springframework...`、`java.util.Base64`） | 遵循框架 Anti-FQCN 绝对铁律，严禁在正文中使用行内全限定类名，所有类名必须且只能在文件头部（package 声明下方）集中显式 `import` 纯类名。 |
+| **8** | 调用 HTTPS 服务时 SSL 握手异常或证书校验失败 | 内部测试或私有云环境使用了自签名证书 | `zhkj-framework-*/src/main` 中未检索到 `disable-ssl` / `sslValidation` 相关开关，不存在 SSL 信任开关配置项 `[待确认]`。请在 JVM 信任库（`-Djavax.net.ssl.trustStore`）中导入证书，或在业务侧自定义 HTTP 客户端配置。 |
+| **9** | `NoClassDefFoundError: R` 或方法签名不匹配 | Maven 多模块跨模块修改后，上游依赖未安装到本地仓库，本地存在增量编译脏类 | 执行 `mvn clean compile -pl <module> -am "-DskipTests=true"` 重新编译上游，或在框架根目录执行 `mvn clean install "-DskipTests=true"` 刷新依赖。 |
+| **10** | `Spring MVC found on classpath, Spring Cloud Gateway requires WebFlux` | WebFlux 网关工程误引入了依赖 Servlet/Tomcat 的 Starter | 网关工程不要引入 `zhkj-framework-starter-web`（其 POM 直接依赖 `spring-boot-starter-web`）；网关侧使用 `zhkj-framework-starter-sso-client`，并需自行引入 `spring-cloud-starter-gateway-server-webflux`（该依赖在 sso-client POM 中为 `<optional>true</optional>`，不会传递）。 |
+| **11** | Windows 下本地开发调试报 `Fatal error compiling: ... 拒绝访问` | 本地 IDE (IDEA/VSCode) 正在运行/调试业务服务，锁定了框架 JAR 包文件句柄 | **严禁强行执行 `mvn clean`**，应直接使用 `mvn install "-DskipTests=true" "-Dgpg.skip=true"` 执行增量覆盖编译。 |
+| **12** | 获取分布式锁失败时前端收到 `500 Internal Server Error` | 旧版本中分布式锁异常未继承框架统一异常基类，未被 `GlobalExceptionHandler` 统一处理 | 升级至当前框架版本：`DistributedLockException extends BaseFrameworkException`（`DistributedLockException.java:16`），由 `GlobalExceptionHandler.handleBaseFrameworkException` 统一处理（`GlobalExceptionHandler.java:60-69`）。HTTP 状态码取决于异常携带的错误码，锁失败场景的具体状态码 `[待确认]`。 |
+| **13** | 租户拦截器与数据权限拦截器顺序颠倒导致过滤异常 | 多个 Starter 动态注入拦截器引发链表插入顺序竞态 | 当前装配顺序为 `Tenant -> DataScope -> Custom -> Pagination`（见 `docs/architecture/overview.md` 第 3.4 节），请勿在业务中另行调整 `MybatisPlusInterceptor` 内部顺序。 |
+| **14** | URL 白名单带多重斜杠（`//admin`）或分号参数绕过安全拦截 | 未在比对前对传入的 `request.getRequestURI()` 进行路径规范化清洗 | `SsoClientFilter`、`SsoGatewayGlobalFilter`、`XssFilter` 已使用 Spring 的 `StringUtils.cleanPath(...)` 规范化路径，业务自定义白名单逻辑需自行调用同类方法。 |
+| **15** | RPC 响应保持脱敏，旧 `X-Internal-RPC: true` 调用不再返回明文 | 安全行为变更：普通 RPC 与公共展示端点默认脱敏，传输标记不再授予明文权限 | 仅对确需明文的内部端点，由宿主先完成调用方认证与端点授权，再设置当前 ServletRequest 的 `RpcRequestAttribute.DESENSITIZE_AUTHORIZED` 为 `Boolean.TRUE`，并在 `finally` 删除。宿主认证过滤器必须先于脱敏过滤器的 `HIGHEST_PRECEDENCE + 20` 执行；公共展示 API 不赋权。不得从 Header 或 ThreadLocal 推断授权；机器认证不等于跨租户授权，委托头另需 `TENANT_DELEGATION_AUTHORIZED`。详见 `starter-web.md` 第 11 节。 |
+| **16** | 编译警告或代码审查指出在类中使用了行内全限定类名 (Anti-FQCN Rule violation) | 在类成员变量、局部变量、方法入参、返回值或注解中书写了长包名（如 `@org.springframework...`、`java.util.Base64`） | 遵循框架 Anti-FQCN 约定，所有类名在文件头部集中显式 `import` 后在正文使用简单类名。 |
+| **17** | Spring Boot 4.x / GraalVM AOT 构建报 `NoClassDefFoundError: org/springframework/data/util/TypeInformation`（源自 `QuerydslPredicateOperationCustomizer`） | Spring Data 4.x 将 `TypeInformation` 迁移至 `org.springframework.data.core`，而基于 Spring Data 3.x 编译的 springdoc 2.x 内部类方法签名仍引用旧包路径，在 AOT 反射内省阶段触发类缺失 | 1. 框架在 `zhkj-framework-data-api` 提供兼容垫片 `org.springframework.data.util.TypeInformation`；<br>2. `OpenApiEnvironmentPostProcessor` 默认设置 `springdoc.enable-data-rest: false`，`OpenApiAutoConfiguration` 在存在 `queryDslQuerydslPredicateOperationCustomizer` 定义时将其移除，业务微服务无需额外处理。 |

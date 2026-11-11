@@ -1,24 +1,18 @@
 # 多租户治理核心：zhkj-framework-starter-tenant
 
-> **模块定位**: 框架无关多租户治理核心 Starter，提供租户上下文纳管（`TenantContext`）、双模自愈探测机制、租户忽略规则引擎 SPI 及受控切换运行范式。  
-> **适用基准**: OpenJDK 21 (LTS), Spring Boot 4.1.1  
+> **模块定位**: 框架无关的多租户上下文与解析模块。提供 `TenantContext` 线程上下文、请求头与子域名解析器、租户注册表、RPC 租户头透传，以及 MyBatis 行级隔离所依赖的 `TenantRuleProvider` SPI。  
+> **适用基准**: OpenJDK 21, Spring Boot 4.x  
 > **模块坐标**: `io.github.ybb88:zhkj-framework-starter-tenant`
 
 ---
 
 ## 📋 1. 架构定位与核心设计
 
-在企业 SaaS 平台与多机构共享体系中，多租户隔离是系统的最高物理安全红线：
-
-1. **框架无关独立抽象**：将租户上下文从具体 ORM 彻底解耦，无论使用 MyBatis-Plus、JPA 还是纯 JDBC，统一依赖 `TenantContext` 调度；
-2. **双模自愈探测机制 (Dual-Mode Self-Healing)**：
-   - 在批处理、异步任务或 MQ 消费等无 Servlet 请求头的场景下，拦截器首先读取 `TenantContext.getTenantId()`；
-   - 若为空，自动动态降级探测安全上下文 `SecurityContextHolder.getTenantId()`；
-   - 一旦在安全上下文中捕获到租户身份，立即执行**自动自愈回填**，强制追加 `WHERE tenant_id = 'xxx'`，从根源上杜绝无 Header 时的穿透越权漏洞；
-3. **租户规则引擎 SPI (`TenantRuleProvider`)**：
-   - 允许业务端通过 SPI 动态定义忽略多租户隔离的全局系统字典表（如 `sys_dict`、`sys_region`）或白名单 URL；
-4. **受控临时租户切换 (`runWithTenant`)**：
-   - 提供安全的作用域模式切换租户上下文，任务执行完毕后强制自动回滚为原租户，杜绝线程污染。
+1. **上下文与 ORM 解耦**：`TenantContext` 基于 `ThreadLocal<TenantInfo>`，不依赖具体持久层。MyBatis 行级隔离由 `starter-mybatis` 的 `MybatisTenantHandler` 通过 `TenantRuleProvider` 读取上下文。
+2. **请求解析链**：`TenantInterceptor` 按 `TenantResolver` 的 `@Order` 依次执行；首个返回非 `null` 的解析结果写入 `TenantContext`，请求结束后清理。
+3. **未识别租户不拒绝请求**：拦截器对未识别的请求放行，租户上下文为空。是否需要租户由业务或 ORM 层判断。
+4. **静态注册与请求状态分离**：`TenantRegistry` 仅保存静态元数据（不含 `dimensionId`、`delegatedTenantId`、`grantTicket`）。解析结果为请求级实例，不回写注册表。
+5. **快照传播**：`TenantContextSnapshotProvider` 注册到 `FrameworkContext`，跨线程使用 `FrameworkContext.capture()` 与 `runWith` / `openScope` 传递；工作线程不会自动继承 `ThreadLocal`。
 
 ---
 
@@ -37,17 +31,36 @@
 
 ```
 io.github.ybb88.framework.tenant
+├── annotation/TenantIgnore.java                 # 方法/类级忽略租户解析（仅作用于 HTTP 拦截器）
+├── config/TenantCoreAutoConfiguration.java      # 自动装配（需 zhkj.tenant.enabled=true）
 ├── context/
-│   ├── TenantContext.java             # 租户上下文持有者 (基于 ThreadLocal)
-│   └── TenantContextHolder.java       # 历史兼容持有门面
-├── config/
-│   ├── TenantAutoConfiguration.java   # 租户核心自动装配
-│   └── TenantProperties.java          # 租户全局配置 (列名、忽略表等)
-├── provider/
-│   └── TenantRuleProvider.java        # 租户规则引擎 SPI 接口
-└── util/
-    └── TenantUtil.java                # 租户校验与辅助工具
+│   ├── TenantContext.java                       # ThreadLocal 上下文与作用域工具
+│   ├── TenantContextHolder.java                 # 门面（委托 TenantContext）
+│   └── TenantContextSnapshotProvider.java       # FrameworkContext 快照（order 100）
+├── core/
+│   ├── TenantConstant.java                      # DEFAULT_TENANT_ID = "0"，ADMIN_TENANT_ID = "00000000"
+│   ├── TenantRuleProvider.java                  # 行级隔离规则 SPI
+│   ├── DefaultTenantRuleProvider.java           # 默认实现（读取 zhkj.tenant.field-isolation.*）
+│   ├── TenantId.java, ZhkjTenantId.java         # 租户 ID 生成 SPI（默认返回 "0"）
+├── interceptor/TenantInterceptor.java           # Servlet 拦截器
+├── model/
+│   ├── TenantInfo.java                          # 租户模型
+│   ├── TenantIsolationMode.java                 # SHARED_DATABASE / SHARED_INSTANCE / ISOLATED_DATABASE（仅枚举）
+│   └── TenantDataSourceConfig.java              # 数据源元数据（仅保存）
+├── properties/
+│   ├── TenantProperties.java                    # zhkj.tenant.*
+│   └── TenantFieldIsolationProperties.java      # column / tables / ignore-tables / default-tenant-id
+├── registry/TenantRegistry.java
+├── resolver/
+│   ├── TenantResolver.java                      # 解析 SPI
+│   ├── HeaderTenantResolver.java                # @Order(1)
+│   └── SubdomainTenantResolver.java             # @Order(2)
+└── rpc/TenantRpcHeaderProvider.java             # RPC 头透传
 ```
+
+自动装配（`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`）：`TenantCoreAutoConfiguration`。
+
+启用后，核心配置独立装配 `TenantRegistry`、`TenantContextSnapshotProvider`、`TenantRuleProvider` 与 `TenantRpcHeaderProvider`，纯 MyBatis、批处理等非 Web 应用无需补充 Spring MVC 或 Servlet 依赖。Header/Subdomain 解析器、`TenantInterceptor` 及 MVC 注册逻辑隔离在静态嵌套 `TenantWebMvcConfiguration` 中，仅在 Servlet Web 应用且 `WebMvcConfigurer`、`HttpServletRequest` 类存在时装配，避免核心配置的方法签名提前加载可选 Web 类型。
 
 ---
 
@@ -56,73 +69,179 @@ io.github.ybb88.framework.tenant
 ```yaml
 zhkj:
   tenant:
-    enabled: true                      # 是否开启全局多租户隔离 (默认: true)
-    column: "tenant_id"                # 数据库物理租户隔离列名 (默认: tenant_id)
-    ignore-tables:                     # 忽略租户隔离的全局共享表白名单
-      - "sys_tenant"
-      - "sys_dict"
-      - "sys_region"
-      - "sys_config"
-    ignore-urls:                       # 忽略租户校验的 URL 白名单
-      - "/doc.html"
-      - "/actuator/**"
+    enabled: true                        # 必须显式设为 true，缺省不装配
+    field-isolation:
+      column: tenant_id                  # 默认 tenant_id
+      tables: []                         # 非空时仅这些表参与隔离
+      ignore-tables: [sys_tenant, sys_dict]
+      default-tenant-id: "00000000"      # 绑定值，DefaultTenantRuleProvider 未读取
+    tenants:                             # 静态租户元数据（可选）
+      - tenant-id: "1001"
+        tenant-name: "示例机构"
+        tenant-code: "demo"              # 子域名解析键
+        isolation-mode: SHARED_DATABASE
+        data-source-key: "ds_demo"       # 仅作元数据保存
+```
+
+| 键 | 默认值 | 说明 |
+|----|--------|------|
+| `zhkj.tenant.enabled` | 未设置时不装配 | 条件注解 `matchIfMissing=false` |
+| `zhkj.tenant.default-isolation-mode` | `SHARED_DATABASE` | 已绑定，本模块内未读取 |
+| `zhkj.tenant.resolvers` | `[header, subdomain]` | 已绑定，本模块内未读取，解析器顺序由 `@Order` 决定 |
+| `zhkj.tenant.tenants` | 空 | 启动时注册到 `TenantRegistry` |
+| `zhkj.tenant.field-isolation.column` | `tenant_id` | 默认规则提供者的全局隔离列 |
+| `zhkj.tenant.field-isolation.tables` | 空 | 全局白名单表（空表示全部表，忽略表除外） |
+| `zhkj.tenant.field-isolation.ignore-tables` | 空 | 全局不做租户隔离的表 |
+
+MyBatis 配置优先级（详见 [starter-mybatis](starter-mybatis.md)）：
+
+- 使用框架自动创建的 `DefaultTenantRuleProvider` 时，`zhkj.tenant.field-isolation.column`、`tables`、`ignore-tables` 提供全局默认值；`zhkj.tenant.mybatis` 下的同名字段按实际显式绑定逐字段覆盖，未配置字段继续继承全局值。
+- 适配通过 Spring Binder 完成，不以属性默认值推断配置显式性；显式 `column: tenant_id` 仍属于覆盖，列表整体替换，显式空列表可清空继承列表。MyBatis 使用独立的默认规则提供者实例，不修改共享全局配置或其他 ORM 规则。
+- 应用自定义的 `TenantRuleProvider` 始终优先，包括直接注册的 `DefaultTenantRuleProvider`、其子类或代理；MyBatis 配置不会覆盖其列名与表级裁决。租户身份解析和是否忽略隔离仍由规则提供者负责，配置适配不改变缺失上下文策略。
+- 若裁剪自动配置、完全没有 `TenantRuleProvider` Bean，`MybatisTenantHandler` 才使用 `zhkj.tenant.mybatis.*` 的内建路径，此时不继承全局字段规则。
+
+---
+
+## 🔎 5. 租户解析
+
+### 5.1 请求头（`HeaderTenantResolver`，`@Order(1)`）
+
+按顺序读取第一个非空值作为租户 ID：`X-Tenant-Id`、`X-Tenant-ID`、`tenant-id`、`zhkj-tenant-id`。
+
+- 注册表中存在该租户：使用注册元数据的副本；
+- 不存在：构造仅属于本次请求的 `TenantInfo`（`SHARED_DATABASE`），不写入注册表；
+- `X-Dimension-Id` 非空时写入 `dimensionId`；
+- 仅当当前请求的 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED` 属性为 `Boolean.TRUE`，且同时存在 `X-Delegated-Tenant-Id` 与 `X-Grant-Ticket` 时，接受委托头；`X-Internal-RPC` 不作为权限依据。
+
+> 未知请求头租户会成为当前请求的租户上下文，**租户解析本身不做授权校验**。公网入口须剥离客户端自带的租户与内部委托头，并由业务完成授权。网关在认证、匿名白名单及 `enabled=false` 分支均剥离 `X-Internal-RPC`、`X-Delegated-Tenant-Id`、`X-Grant-Ticket`。
+
+**安全行为变更与迁移**：旧标记头不再允许委托。宿主必须先认证调用方并校验目标端点及租户委托权限，再受控设置当前 ServletRequest 的 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED` 为 `Boolean.TRUE`，并在包围下游处理的 `finally` 中删除；不得由 Header、ThreadLocal 或是否携带机器凭据推断授权。机器认证、脱敏授权与租户委托授权互不等价；基于可信 JWT 声明建立的现有上下文仍按原逻辑处理。
+
+### 5.2 子域名（`SubdomainTenantResolver`，`@Order(2)`）
+
+取主机名首段（主机至少 3 段，如 `demo.example.com`）作为键，在注册表中按 `tenant-code` 查找。
+
+### 5.3 解析器扩展
+
+实现 `TenantResolver`（`HttpServletRequest` → `TenantInfo`，`getOrder()` 决定顺序，默认 100），注册为 Bean 即被 `TenantInterceptor` 收集。`TenantCoreAutoConfiguration.TenantWebMvcConfiguration` 中的 `headerTenantResolver`、`subdomainTenantResolver`、`tenantInterceptor` 均为 `@ConditionalOnMissingBean`。
+
+### 5.4 `TenantInterceptor`
+
+- 仅 Servlet Web 应用且 MVC/Servlet 相关类存在时装配，注册路径 `/**`；
+- 方法或类标注 `@TenantIgnore` 时跳过解析；
+- 按解析器顺序执行，首个非空结果绑定到 `TenantContext`；解析器抛出的异常仅记录 WARN；
+- `afterCompletion` 清理 `TenantContext`。
+
+`@TenantIgnore` 只影响 HTTP 解析，不影响 MyBatis 的 SQL 改写。
+
+---
+
+## 💡 6. 上下文 API
+
+### 6.1 `TenantContext`（静态方法）
+
+| 分类 | 方法 |
+|------|------|
+| 读取 | `getTenant()`、`getTenantId()`、`getDimensionId()`、`getDelegatedTenantId()`、`getGrantTicket()`、`getDataSourceKey()`、`hasTenant()` |
+| 写入 | `setTenant(TenantInfo)`、`setTenantId(String)`、`setDimensionId(String)`、`setDelegatedTenantId(String)`、`setGrantTicket(String)`、`restoreSnapshot(...)`、`clear()` |
+| 作用域 | `executeInTenant` / `callInTenant` / `callInTenantChecked`（仅切换租户 ID，新作用域不继承维度与委托）；`runWithTenant` / `callWithTenant` / `callWithTenantChecked`（以 `TenantInfo` 切换，退出时恢复原值）；`runWithDimension`、`callWithDimension`；`runWithDelegation`、`callWithDelegation` |
+
+`restoreSnapshot` 对未提供的字段按 `null` 写入，不保留先前值。
+
+### 6.2 `TenantContextHolder`
+
+与 `TenantContext` 功能对应的门面，提供 `setTenant`、`setTenantId`、`getTenantId`、`hasTenant`、`clear`、`runWithTenant`、`runWithTenantId`、`callWithTenant`、`callWithTenantChecked`。
+
+### 6.3 `TenantRegistry`
+
+`registerTenant(TenantInfo)`（别名 `register`）、`getTenantInfo(tenantId)`、`getTenantBySubdomain(code)`、`getTenantByDataSourceKey(key)`、`removeTenant(tenantId)`、`getAllTenants()`、`exists(tenantId)`。所有读取返回元数据副本。
+
+### 6.4 `TenantInfo`
+
+`tenantId`、`dimensionId`、`delegatedTenantId`、`grantTicket`、`tenantName`、`tenantCode`、`isolationMode`、`dataSourceKey`、`schemaName`、`dataSourceConfig`（`TenantDataSourceConfig`）、`status`、`isDefault`。
+
+`dataSourceKey`、`schemaName`、`dataSourceConfig` 仅作为元数据保存，本模块不执行数据源切换。
+
+---
+
+## 🔗 7. RPC 与跨线程
+
+- `TenantRpcHeaderProvider` 在发起远程调用时注入：`X-Tenant-Id`、`X-Tenant-ID`、`zhkj-tenant-id`（租户 ID），`X-Dimension-Id`，`X-Delegated-Tenant-Id`，`X-Grant-Ticket`。值依次取自 `TenantContext`、`FrameworkContext`，租户 ID 最后回退到安全上下文快照。
+- 接收端仅在服务端 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED` 请求属性为 `Boolean.TRUE` 时接受委托头（见第 5.1 节）；传输头与异步上下文快照均不承载该授权。普通 RPC 与公共展示端点默认脱敏，明文权限另由 `DESENSITIZE_AUTHORIZED` 请求属性控制。
+- 异步任务应在提交线程捕获快照：
+
+```java
+ContextSnapshot snapshot = FrameworkContext.capture();
+executor.execute(() -> FrameworkContext.runWith(snapshot, this::doWork));
 ```
 
 ---
 
-## 💡 5. 典型使用范式
+## 🧩 8. MyBatis 行级隔离规则（由 `starter-mybatis` 使用）
 
-### 5.1 获取与校验当前租户
+`DefaultTenantRuleProvider`（`zhkj.tenant.enabled=true` 时注册）提供：
+
+- `getTenantColumn()`：`zhkj.tenant.field-isolation.column`；
+- `ignoreTable(name)`：无租户上下文时返回 `true`；否则命中 `ignore-tables` 或不在非空 `tables` 白名单中时返回 `true`；
+- `resolveTenantId()`：优先委托租户（需同时存在 `grantTicket`），其次 `TenantContext`，再次安全上下文快照，最后 `TenantConstant.DEFAULT_TENANT_ID`（`"0"`）。
+
+表名比较忽略大小写，并去除反引号与双引号。
+
+---
+
+## 💡 9. 典型使用范式
+
+### 9.1 获取当前租户
 ```java
-package io.github.ybb88.demo.service;
-
-import io.github.ybb88.framework.tenant.context.TenantContext;
-import org.springframework.stereotype.Service;
-
-@Service
-public class TenantDemoService {
-
-    public void processBusiness() {
-        // 获取当前请求线程的租户 ID
-        String tenantId = TenantContext.getTenantId();
-        
-        // 执行租户有效性校验
-        if (tenantId == null) {
-            throw new IllegalStateException("当前未检测到合法租户身份");
-        }
-    }
+String tenantId = TenantContext.getTenantId();
+if (tenantId == null) {
+    throw new IllegalStateException("当前未检测到租户上下文");
 }
 ```
 
-### 5.2 受控跨租户切换运行 (`runWithTenant`)
-在系统管理员执行跨租户归档或特权导出时，使用受控闭包执行，执行完毕后原上下文 100% 自动还原：
-
+### 9.2 受控切换租户
 ```java
-public void executeForTenant(String targetTenantId) {
-    // 在指定租户上下文中执行，无论正常退出还是抛异常，离开后均自动恢复先前状态
-    TenantContext.runWithTenant(targetTenantId, () -> {
-        // 此处的数据库持久化操作将自动追加 WHERE tenant_id = 'targetTenantId'
-        reportService.generateDailySummary();
-    });
+// 调用方须先完成目标租户的授权校验
+TenantContext.executeInTenant(targetTenantId, this::generateReport);
+```
+
+### 9.3 忽略 HTTP 解析
+```java
+@TenantIgnore
+@GetMapping("/health")
+public String health() { return "OK"; }
+```
+
+### 9.4 自定义行级规则
+```java
+@Bean
+public TenantRuleProvider tenantRuleProvider(TenantProperties properties) {
+    return new DefaultTenantRuleProvider(properties);   // 或实现 TenantRuleProvider 接口
 }
 ```
 
-### 5.3 扩展租户规则 SPI (`TenantRuleProvider`)
+注册自定义 Bean 时，`TenantCoreAutoConfiguration` 的默认 Bean 不再创建。
+
+### 9.5 静态注册租户
 ```java
-package io.github.ybb88.demo.tenant;
-
-import io.github.ybb88.framework.tenant.provider.TenantRuleProvider;
-import org.springframework.stereotype.Component;
-
-import java.util.List;
-
-@Component
-public class CustomTenantRuleProvider implements TenantRuleProvider {
-
-    @Override
-    public List<String> getIgnoreTables() {
-        // 动态追加需要忽略多租户行级过滤的表名
-        return List.of("biz_common_metadata");
-    }
-}
+TenantInfo tenant = new TenantInfo();
+tenant.setTenantId("1001");
+tenant.setTenantCode("demo");
+tenant.setIsolationMode(TenantIsolationMode.SHARED_DATABASE);
+tenantRegistry.registerTenant(tenant);
 ```
+
+---
+
+## 🛡️ 10. 行为约束
+
+- 无租户上下文时，MyBatis 租户条件不附加（`ignoreTable` 返回 `true`）。批处理与异步任务须显式绑定租户。
+- 未知请求头租户不做授权校验；授权由调用链上游或网关保证。
+- `TenantIsolationMode` 与 `dataSourceKey` 不会自动切换数据源。
+
+---
+
+## 📎 11. 相关文档
+
+- `starter-mybatis`：`MybatisTenantAutoConfiguration`、插件链顺序
+- `starter-sso-client`、`starter-secure`：身份与租户的关系

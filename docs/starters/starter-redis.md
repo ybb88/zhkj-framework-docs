@@ -1,26 +1,18 @@
 # 分布式缓存与分布式锁：zhkj-framework-starter-redis
 
-> **模块定位**: 高性能分布式缓存 Starter，基于 Spring Data Redis 深度定制，提供现代 `RedisSerializer.json()` 序列化、多级动态过期缓存管理器 `RedisAutoCacheManager`、生产级声明式分布式锁 `@DistributedLock` 与 Lua 持有者（Owner）校验防误删安全体系。  
-> **适用基准**: OpenJDK 21 (LTS), Spring Boot 4.1.1, Redis 7.x  
+> **模块定位**: 基于 Spring Data Redis 的缓存、操作门面、发布订阅与分布式锁 Starter，提供 JSON 值序列化、按 `#` 后缀设置缓存 TTL 的缓存管理器、`ZhkjRedis` 操作门面、`@RPubSubListener` 订阅与 `@DistributedLock` 注解。  
+> **适用基准**: OpenJDK 21 (LTS), Spring Boot 4.1.1, Redis 7.x `[待确认]`（仓库未声明 Redis 服务端版本）
 > **模块坐标**: `io.github.ybb88:zhkj-framework-starter-redis`
 
 ---
 
 ## 📋 1. 架构定位与核心设计
 
-分布式高并发应用中，缓存与分布式锁是解决数据库压力与并发防重提单的关键：
-
-1. **Jackson 3 现代序列化工厂**：
-   - 全面采用 Spring Data Redis 官方推荐的 `RedisSerializer.json()`，彻底淘汰存在类全限定名安全隐患与反序列化漏洞的旧式序列化器；
-2. **多级动态过期缓存管理器 (`RedisAutoCacheManager`)**：
-   - 支持在 `@Cacheable` 缓存名中使用 `#` 语法动态指定当前 Key 的 TTL 过期时间（如 `@Cacheable(cacheNames = "order#300")` 表示该 Key 缓存 300 秒），防止大批 Key 同时失效引发的缓存雪崩；
-3. **生产级声明式分布式锁 (`@DistributedLock`)**：
-   - 支持强大的 SpEL 动态参数解析构建锁 Key（如 `@DistributedLock(key = "'order:' + #dto.orderNo")`）；
-   - 支持等待获取锁时间 `waitTime` 与租期 `leaseTime`；
-4. **Lua 脚本持有者（Owner）校验防误删**：
-   - 释放锁时通过原子 Lua 脚本严格比对当前持有者的唯一线程标识（UUID + ThreadId），只有持有者与锁中存储的值完全一致才执行删除，彻底杜绝因业务超时导致的“误删他人锁”灾难；
-5. **强类型异常受控映射**：
-   - 抢锁超时抛出的 `DistributedLockException` 严格继承自 `BaseFrameworkException`，由全局异常处理器统一拦截转为友好的 `400 Bad Request` 响应，绝不向前端暴露 500 未知系统崩溃。
+1. **值序列化**: `RedisSerializer.json()` 作为默认值序列化器，供 `redisTemplate`、Spring Cache 与发布订阅共享。
+2. **键前缀**: `RedisKeySerializer` 为键统一添加 `zhkj.redis.prefix` 前缀（默认 `zhkj:`），已带前缀的键不重复添加。
+3. **单条缓存 TTL**: `RedisAutoCacheManager` 解析 `@Cacheable(cacheNames = "name#ttl")` 中的 `#` 后缀，为该缓存设置过期时间。
+4. **分布式锁**: `@DistributedLock` 切面，锁状态存于 Redis，释放时校验持有者标识。切面优先级为 `HIGHEST_PRECEDENCE + 1`，位于事务切面外层。
+5. **缓存作用域**: `CacheScope`、`CacheNamespaceResolver`、`ScopeCacheEvictor` 提供按全局、租户、维度、委托维度隔离缓存键的能力。
 
 ---
 
@@ -33,31 +25,96 @@
 </dependency>
 ```
 
+依赖（来自 `pom.xml`）: `zhkj-framework-core`、`spring-boot-autoconfigure`、`spring-boot-starter-data-redis`、`spring-boot-starter-cache`、`tools.jackson.core:jackson-databind`、`spring-boot-starter-aspectj`。
+
 ---
 
-## 🧱 3. 核心包结构与组件
+## 🧱 3. 包结构
 
 ```
 io.github.ybb88.framework.redis
 ├── cache/
-│   ├── RedisAutoCacheManager.java     # 支持动态 TTL 过期的缓存管理器
-│   └── CacheProperties.java           # 缓存全局属性配置
+│   ├── ZhkjRedis.java                   # 操作门面
+│   ├── CacheKey.java                    # 键 + 过期时间
+│   ├── CacheNames.java                  # 缓存名常量接口 (sys / user / auth / datascope)
+│   ├── CacheScope.java                  # GLOBAL / TENANT / DIMENSION / DELEGATED
+│   ├── CacheNamespaceResolver.java      # 命名空间解析 SPI
+│   ├── DefaultCacheNamespaceResolver.java
+│   ├── ScopeCacheEvictor.java           # 按租户、维度、模式批量删除
+│   └── ICacheKey.java
+├── config/
+│   ├── RedisTemplateConfiguration.java  # RedisTemplate、StringRedisTemplate、ZhkjRedis
+│   ├── ZhkjRedisCacheAutoConfiguration.java  # CacheManager (@Primary)、作用域组件
+│   ├── RedisAutoCacheManager.java       # 支持 # TTL 后缀
+│   └── RedisPubSubConfiguration.java    # 监听容器、发布器、监听器探测
 ├── lock/
-│   ├── annotation/
-│   │   └── DistributedLock.java       # 声明式分布式锁注解
-│   ├── aspect/
-│   │   └── DistributedLockAspect.java # 分布式锁 AOP 切面 (SpEL 解析、重试、释放)
-│   ├── exception/
-│   │   └── DistributedLockException.java # 强类型抢锁失败异常
-│   └── script/
-│       └── RedisLockScripts.java      # Lua 原子加锁与持有者防误删释放脚本
-└── config/
-    └── RedisAutoConfiguration.java    # RedisTemplate 与 RedisSerializer 自动装配
+│   ├── annotation/DistributedLock.java
+│   ├── aspect/DistributedLockAspect.java
+│   ├── config/DistributedLockAutoConfiguration.java
+│   ├── core/                            # LockExecutor、LockFailureStrategy、LockInstance
+│   ├── exception/DistributedLockException.java
+│   ├── executor/RedisTemplateLockExecutor.java
+│   ├── resolver/LockKeyResolver.java
+│   └── script/DistributedLockScripts.java
+├── props/ZhkjRedisProperties.java       # zhkj.redis.*
+├── pubsub/
+│   ├── RPubSubListener.java             # 方法注解
+│   ├── RPubSubListenerDetector.java     # BeanPostProcessor
+│   ├── RPubSubListenerLazyFilter.java
+│   ├── RPubSubEvent.java
+│   ├── RPubSubPublisher.java
+│   ├── RedisPubSubPublisher.java
+│   └── ChannelUtil.java
+└── serializer/RedisKeySerializer.java
 ```
 
 ---
 
-## ⚙️ 4. 核心配置清单 (`application.yml`)
+## 🔁 4. 自动装配
+
+`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` 注册:
+
+- `RedisTemplateConfiguration`
+- `ZhkjRedisCacheAutoConfiguration`
+- `RedisPubSubConfiguration`
+- `DistributedLockAutoConfiguration`
+
+| 配置类 | Bean | 条件 |
+| :--- | :--- | :--- |
+| `RedisTemplateConfiguration` | `redisSerializer`（`RedisSerializer<Object>`，`RedisSerializer.json()`） | 缺失时注册 |
+| | `redisTemplate`（`RedisTemplate<String, Object>`） | 名称缺失时注册；键使用 `RedisKeySerializer`，值使用 `redisSerializer` |
+| | `stringRedisTemplate`（`StringRedisTemplate`） | 类型缺失时注册；键使用 `RedisKeySerializer`，值为字符串 |
+| | `zhkjRedis`（`ZhkjRedis`） | 存在 `RedisTemplate` 且 `ZhkjRedis` 缺失时注册 |
+| `ZhkjRedisCacheAutoConfiguration` | `redisCacheManager`（方法返回类型 `RedisCacheManager`，实例为 `RedisAutoCacheManager`，`@Primary`） | 始终注册 |
+| | `cacheNamespaceResolver`、`scopeCacheEvictor` | 缺失时注册 |
+| `RedisPubSubConfiguration` | `rPubSubListenerLazyFilter`、`redisMessageListenerContainer`（缺失时） | — |
+| | `topicEventPublisher`（`RPubSubPublisher`）、`topicListenerDetector`（`BeanPostProcessor`） | 始终注册 |
+| `DistributedLockAutoConfiguration` | `lockKeyResolver`、`lockExecutor`（`RedisTemplateLockExecutor`）、`distributedLockAspect` | `zhkj.redis.lock.enabled`（缺省视为 `true`） |
+
+`RedisTemplateConfiguration` 标注 `@EnableCaching`；`ZhkjRedisCacheAutoConfiguration` 未标注。
+
+---
+
+## ⚙️ 5. 配置项
+
+### 5.1 框架配置（`zhkj.redis`）
+
+| 键 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `zhkj.redis.prefix` | `zhkj` | `RedisKeySerializer` 的键前缀，规范化为 `zhkj:`；键已包含前缀时不重复添加 |
+| `zhkj.redis.lock.enabled` | `true` | 是否装配分布式锁 |
+
+### 5.2 Spring 标准配置
+
+连接参数使用 `spring.data.redis.*`。Spring Cache 参数使用 `spring.cache.*`（`CacheProperties`）:
+
+| 键 | 说明 |
+| :--- | :--- |
+| `spring.cache.cache-names` | 启动时预创建的缓存名列表（使用默认配置） |
+| `spring.cache.redis.time-to-live` | 默认 TTL |
+| `spring.cache.redis.key-prefix` | 缓存键前缀（Spring Cache 写入 Redis 时） |
+| `spring.cache.redis.use-key-prefix` | 是否使用前缀，默认按 Spring 规则 |
+| `spring.cache.redis.cache-null-values` | 是否缓存 `null` |
 
 ```yaml
 spring:
@@ -65,94 +122,199 @@ spring:
     redis:
       host: 127.0.0.1
       port: 6379
-      password: "ENC(encrypted_redis_pwd)"
-      database: 0
-      timeout: 5000ms
-      lettuce:
-        pool:
-          max-active: 16
-          max-idle: 8
-          min-idle: 2
-
-zhkj:
+      timeout: 3000ms
   cache:
-    enabled: true                      # 是否开启 Redis 增强缓存 (默认: true)
-    default-expire: 86400              # 默认缓存过期时间 (秒)
+    redis:
+      time-to-live: 1h
+zhkj:
+  redis:
+    prefix: zhkj
+    lock:
+      enabled: true
 ```
 
 ---
 
-## 💡 5. 典型使用范式
+## 🕒 6. 缓存与单条 TTL
 
-### 5.1 声明式防重提单分布式锁 (`@DistributedLock`)
+`@Cacheable` 的缓存名支持 `名称#时长` 语法。时长由 `DurationStyle.detectAndParse` 解析，未带单位的数字按秒处理（如 `30s`、`5m`、`2h`、`7d`）。
+
 ```java
-package io.github.ybb88.demo.controller;
-
-import io.github.ybb88.framework.api.R;
-import io.github.ybb88.framework.redis.lock.annotation.DistributedLock;
-import io.github.ybb88.demo.dto.OrderCreateDto;
-import io.github.ybb88.demo.vo.OrderVo;
-import io.github.ybb88.demo.service.OrderService;
-import lombok.RequiredArgsConstructor;
-import org.springframework.web.bind.annotation.*;
-
-@RestController
-@RequestMapping("/api/v1/orders")
-@RequiredArgsConstructor
-public class OrderController {
-
-    private final OrderService orderService;
-
-    /**
-     * 创建订单防重控制：
-     * 1. 锁 Key 基于 SpEL 动态生成: order:create:ORD20261017001
-     * 2. waitTime = 3000ms: 最多等待 3 秒抢锁，超时直接抛出 DistributedLockException
-     * 3. leaseTime = 10000ms: 锁最大持有租期 10 秒，防止死锁
-     * 4. message: 抢锁失败时返回给前端的友好提示
-     */
-    @PostMapping
-    @DistributedLock(
-        key = "'order:create:' + #dto.orderNo",
-        waitTime = 3000,
-        leaseTime = 10000,
-        message = "订单正在处理中，请勿重复提交"
-    )
-    public R<OrderVo> createOrder(@RequestBody OrderCreateDto dto) {
-        OrderVo vo = orderService.createOrder(dto);
-        return R.data(vo);
-    }
-}
-```
-
-### 5.2 动态过期注解缓存 (`@Cacheable`)
-```java
-package io.github.ybb88.demo.service;
-
-import io.github.ybb88.demo.vo.ProductVo;
-import org.springframework.cache.annotation.Cacheable;
-import org.springframework.stereotype.Service;
-
 @Service
 public class ProductService {
 
-    /**
-     * 使用 #300 语法声明该缓存的 TTL 为 300 秒 (5分钟)
-     */
-    @Cacheable(cacheNames = "product#300", key = "#id")
+    // 使用全局默认 TTL
+    @Cacheable(cacheNames = "product", key = "#id")
     public ProductVo getProductById(Long id) {
-        // 若缓存未命中则查询数据库
+        return loadFromDatabase(id);
+    }
+
+    // 该缓存有效期 5 分钟
+    @Cacheable(cacheNames = "product#5m", key = "#id")
+    public ProductVo getHotProduct(Long id) {
         return loadFromDatabase(id);
     }
 }
 ```
 
-### 5.3 注入 `RedisTemplate` 原生操作
+`cacheNames` 中的 `#` 后缀由 `RedisAutoCacheManager.createRedisCache` 剥离，剩余部分作为缓存名。
+
+---
+
+## 🧰 7. 操作门面 `ZhkjRedis`
+
+`ZhkjRedis` 按数据结构提供方法（以下仅列出分组与代表方法，完整列表见源码）:
+
+| 分组 | 代表方法 |
+| :--- | :--- |
+| 字符串 | `set(String, Object)`、`setEx(String, Object, Duration)`、`setEx(String, Object, Long seconds)`、`get(String)`、`get(String, Supplier<T>)`、`getAndDel`、`mSet`、`mGet`、`incr`、`incrBy`、`decr`、`decrBy` |
+| 键 | `del(...)`、`exists`、`expire(String, long)`、`expire(String, Duration)`、`expireAt`、`ttl`、`pttl`、`persist`、`type`、`keys(pattern)`、`scan(pattern[, count][, consumer])` |
+| 哈希 | `hSet`、`hMset`、`hGet`、`hmGet`、`hDel`、`hExists`、`hGetAll`、`hKeys`、`hVals`、`hLen`、`hIncrBy` |
+| 列表 | `lPush`、`rPush`、`lPop`、`rPop`、`lRange`、`lLen`、`lTrim`、`lRem` |
+| 集合 | `sAdd`、`sMembers`、`sIsMember`、`sRem`、`sInter`、`sUnion`、`sDiff` |
+| 有序集合 | `zAdd`、`zRange`、`zRevrange`、`zRangeByScore`、`zRank`、`zScore`、`zRem`、`zCard`、`zCount` |
+| 发布 | `publish(String channel, T message, Function<T, byte[]> mapper)` |
+
+`CacheKey` 封装键与过期时间，`set(CacheKey, Object)` 按其 `expire` 设置 TTL。
+
 ```java
 @Autowired
-private RedisTemplate<String, Object> redisTemplate;
+private ZhkjRedis zhkjRedis;
 
-public void saveSession(String key, Object data) {
-    // 现代 API 推荐传入 java.time.Duration
-    redisTemplate.opsForValue().set(key, data, Duration.ofMinutes(30));
+public void demo() {
+    zhkjRedis.setEx("session:token:abc", tokenInfo, 600L);     // 600 秒
+    Long counter = zhkjRedis.incrBy("page:view:1001", 1L);
+    TokenInfo cached = zhkjRedis.get("session:token:abc");
 }
 ```
+
+---
+
+## 📣 8. 发布订阅
+
+### 8.1 发布
+
+```java
+@Autowired
+private RPubSubPublisher publisher;
+
+public void notifyRefresh() {
+    publisher.publish("CONFIG_REFRESH_CHANNEL", new RefreshCommand("dict"));
+}
+```
+
+`RedisPubSubPublisher` 通过 `ZhkjRedis.publish` 发送，消息体由容器中注入的 `RedisSerializer<Object>`（默认为 `RedisSerializer.json()`）序列化。
+
+### 8.2 订阅
+
+```java
+@Component
+public class CacheRefreshListener {
+
+    @RPubSubListener("CONFIG_REFRESH_CHANNEL")
+    public void onMessage(RPubSubEvent<RefreshCommand> event) {
+        log.info("收到广播 channel={}, msg={}", event.getChannel(), event.getMsg());
+    }
+}
+```
+
+`@RPubSubListener` 规则:
+
+- 标注在方法上，`value` 为频道名；含 `*`、`?` 或成对的 `[...]` 时按模式订阅（`PatternTopic`），否则为精确订阅（`ChannelTopic`）。判定由 `ChannelUtil.isPattern` 实现，其循环 `for (int i = length - 1; i > 0; i--)` 不检查下标 0，因此仅首字符为通配符的频道（如 `*abc`）会被判为精确订阅。
+- 方法参数个数为 0 或 1（超过 1 个时启动期抛出 `IllegalArgumentException`）；有参时接收 `RPubSubEvent<Object>`（属性 `pattern`、`channel`、`msg`）。
+- 消息体由容器中的 `RedisSerializer` 反序列化。
+
+> **代码现状注意**: 源码核对确认两端频道名不一致。`ZhkjRedis.publish` 通过 `keySerialize(channel)` 发送，频道名经 `RedisKeySerializer` 追加 `zhkj.redis.prefix` 前缀（默认 `zhkj:`）；`RPubSubListenerDetector` 以注解原始 `value` 订阅（`ChannelUtil.getTopic`）。即默认配置下发布至 `zhkj:<channel>`，订阅 `<channel>`（见 `ZhkjRedis.java:1148-1151`、`RPubSubListenerDetector.java:44`）。该结论仅来自源码阅读，运行时行为未验证。
+
+---
+
+## 🔒 9. 分布式锁 `@DistributedLock`
+
+```java
+@Service
+public class OrderPaymentService {
+
+    @DistributedLock(
+        key = "'pay:' + #order.orderNo",
+        waitTime = 3,
+        leaseTime = 30,
+        failureStrategy = LockFailureStrategy.THROW_EXCEPTION,
+        message = "订单正在支付处理中，请勿重复操作"
+    )
+    @Transactional(rollbackFor = Exception.class)
+    public PayResult processPayment(OrderDto order) {
+        return executePay(order);
+    }
+
+    @DistributedLock(key = "'sync:batch:task'", waitTime = 0, failureStrategy = LockFailureStrategy.RETURN_NULL)
+    public void runDailySyncTask() {
+        doSyncWork();
+    }
+
+    @DistributedLock(
+        key = "'query:hot:' + #productId",
+        failureStrategy = LockFailureStrategy.FALLBACK_METHOD,
+        fallbackMethod = "queryProductFallback"
+    )
+    public ProductVo queryProduct(Long productId) {
+        return queryFromDbAndCache(productId);
+    }
+
+    public ProductVo queryProductFallback(Long productId) {
+        return getDegradedProductCache(productId);
+    }
+}
+```
+
+### 9.1 注解属性
+
+| 属性 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `key` | String | 必填 | 锁标识，支持 SpEL（`#参数名`、`#对象.属性`、字符串拼接；仅当 key 含 `#`、`'` 或 `+` 时求值） |
+| `prefix` | String | `""` | 为空时使用 `zhkj:lock:`；非空且不以 `:` 结尾时自动补 `:` |
+| `waitTime` | long | `0` | 等待抢锁时长（单位见 `timeUnit`），`0` 表示非阻塞 |
+| `leaseTime` | long | `30` | 锁租期，到期自动释放 |
+| `timeUnit` | TimeUnit | `SECONDS` | `waitTime` 与 `leaseTime` 的单位 |
+| `failureStrategy` | LockFailureStrategy | `THROW_EXCEPTION` | 抢锁失败处理策略 |
+| `message` | String | `当前业务正在处理中，请稍后重试` | `THROW_EXCEPTION` 时的异常消息 |
+| `fallbackMethod` | String | `""` | `FALLBACK_METHOD` 时调用的同类方法名，参数类型须与原方法一致 |
+
+### 9.2 失败策略（`LockFailureStrategy`）
+
+| 值 | 行为 |
+| :--- | :--- |
+| `THROW_EXCEPTION` | 抛出 `DistributedLockException`（继承 `BaseFrameworkException`，错误码 `FAILURE`） |
+| `RETURN_NULL` | 返回 `null` |
+| `FALLBACK_METHOD` | 调用同类的 `fallbackMethod`；方法不存在时抛出 `DistributedLockException` |
+
+### 9.3 执行机制
+
+- 锁存于 Redis，`RedisTemplateLockExecutor` 通过 Lua 脚本（`DistributedLockScripts`）原子加锁与释放。
+- 持有者标识为 `JVM 进程 UUID（无横线）+ ":" + 线程 ID`，释放时比对持有者。
+- 同一线程重复加锁为可重入（执行器注释描述为 Redis Hash 计数器）。
+- 等待模式下以 10–50 毫秒间隔重试，直至超过 `waitTime`。
+- 切面 `@Order(Ordered.HIGHEST_PRECEDENCE + 1)`，锁在 `@Transactional` 外层获取，在事务结束后释放。
+
+---
+
+## 🧩 10. 缓存作用域
+
+`CacheScope` 取值: `GLOBAL`、`TENANT`、`DIMENSION`、`DELEGATED`。`DefaultCacheNamespaceResolver.resolvePrefix(缓存名, 作用域)` 生成的前缀（末尾均附加缓存名）为:
+
+| 作用域 | 前缀 |
+| :--- | :--- |
+| `GLOBAL` | `g:<缓存名>:` |
+| `TENANT` | `t:<租户ID>:<缓存名>:` |
+| `DIMENSION` | `t:<租户ID>:d:<维度ID>:<缓存名>:`（无维度 ID 时省略 `d:` 段） |
+| `DELEGATED` | `del:<委托租户ID>:<缓存名>:`；无委托或无票据时降级为 `TENANT` 前缀 |
+
+`ScopeCacheEvictor` 提供 `evictByTenant(tenantId)`、`evictByDimension(tenantId, dimensionId)`、`evictByPattern(pattern)`，均返回删除数量，使用 `StringRedisTemplate` 扫描删除。
+
+`CacheNames` 为常量接口，定义 `SYS_CACHE`（`sys`）、`USER_CACHE`（`user`）、`AUTH_CACHE`（`auth`）、`DATA_SCOPE_CACHE`（`datascope`）。
+
+---
+
+## 🔗 11. 相关文档
+
+- 核心工具与上下文: [core](./core.md)
+- Web 层: [starter-web](./starter-web.md)

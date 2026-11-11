@@ -1,7 +1,8 @@
 # ZHKJ Framework 任务清单与演进路线图 (Roadmap)
 
 > **当前版本**: 2026.4.1.0-SNAPSHOT  
-> **验证基准**: 全量 18 个框架核心 Starter 与示例工程编译测试全部通过 (100% BUILD SUCCESS, 0 Errors, 0 Failures)  
+> **框架模块**: 17 个（`zhkj-framework-*`，见根 `pom.xml` 的 `<modules>`）；示例工程 `samples/`（不在根 reactor 中）  
+> **历史验收记录**: 早期记录中的 “全量构建 BUILD SUCCESS / 双工程模块全绿” 结论，本次文档核对未能复现，构建结果以 CI（`.github/workflows/ci.yml`）为准  
 > **核心架构师**: Jason.Yang（274107098@qq.com）  
 
 ---
@@ -11,32 +12,34 @@
 ### 1. 架构解耦与现代化底座
 - [x] 多租户模块全面解耦（独立为 `zhkj-framework-starter-tenant`）
 - [x] 数据权限模块重构（拆分为框架无关抽象 `starter-datascope` 与 MyBatis AST 拦截器实现）
-- [x] Web 模块规范化重构（统一引导器 `launcher` + 独立组件 `starter-web`，包名规范为 `io.github.ybb88.framework.web.*`）
+- [x] Web 模块规范化重构（统一引导入口 `launcher` + 独立组件 `starter-web`，包名为 `io.github.ybb88.framework.web.*`）
 - [x] 数据访问统一抽象设计（建立 `zhkj-framework-data-api`，定义 `IAuditEntity` / `ITenantEntity` / `PojoBaseEntity`）
-- [x] 声明式 HTTP 客户端演进（彻底废弃已停滞维护的 OpenFeign，全面采用 Spring 6+ HTTP Interfaces `@HttpExchange`，独立收敛为 `zhkj-framework-starter-http`）
-- [x] 现代化技术栈全面治理（Spring 7 / Spring Boot 4.1.1 / Spring Batch 6.0.5 API 治理，消除全部过时与废弃编译器警告）
-- [x] 数据安全与全生命周期加解密（`starter-crypto` 统一提供 Spring Boot 4 `EnvironmentPostProcessor` 配置解密、Jackson 动态脱敏、MyBatis `EncryptTypeHandler` 字段透明存储加密与 HMAC-SM3 盲索引等值检索）
-- [x] Nacos 模块彻底解耦与 Jasypt 下线（移除所有旧 Jasypt 与 RSA 配置加密逻辑，Nacos 专注服务治理与配置同步）
-- [x] 全工程代码瘦身与规范工具类单数命名（删除历史 `base64/` 复制源码及空工具类，新增 `JsonUtil`、`IdUtil`、`DigestUtil`，消除常量继承反模式）
-- [x] 全模块 Jackson 3 原生现代化升级（`tools.jackson.core:jackson-databind` 3.x 深度重构，废弃类与方法全面替代）
-- [x] 根 POM 依赖卫生规约落地（所有第三方外部依赖版本 100% 集中由根 POM `<properties>` 与 `<dependencyManagement>` 纳管，子模块 POM 零硬编码版本）
+- [x] 声明式 HTTP 客户端演进（废弃 OpenFeign，采用 Spring 6+ HTTP Interfaces `@HttpExchange`，实现于 `zhkj-framework-starter-http`）
+- [x] 现代化技术栈治理（Spring Boot 4.1.1 基线；Spring Framework 版本以 Boot BOM 为准，根 POM 注释写作 6.x，`[待确认]`）
+- [x] 数据安全与全生命周期加解密（`starter-crypto` 提供 `EnvironmentPostProcessor` 配置解密、Jackson 动态脱敏、MyBatis `EncryptTypeHandler` 透明加密与 HMAC 盲索引检索）
+- [x] Nacos 模块解耦与 Jasypt 下线（`starter-nacos` 仅负责服务治理与配置接入，不含配置加解密逻辑）
+- [x] 工具类单数命名与历史代码清理（`JsonUtil`、`IdUtil`、`DigestUtil` 等现行类，`StringPool`/`CharPool` 为 final 类）
+- [x] Jackson 3 现代化升级（`tools.jackson.*`，`JacksonConfiguration` 中使用 `DateTimeFeature`）
+- [x] 根 POM 依赖纳管（框架内部模块与第三方版本集中于根 POM；子模块 POM 未发现字面量版本）
+  > 已完成清理：经检索框架与 NCAP 全部 POM，引用未定义版本属性的 Batik（`batik-all` / `batik-svgpp`）、XML Graphics Commons、XML Security、XXL-Job、P6Spy 均无消费声明，对应六项依赖管理已删除，不补猜版本。
 
-### 2. 安全合规与生产级稳定性闭环
-- [x] 数据权限 UPDATE / DELETE 行级 AST 改写闭环与 1=0 恒假防穿透（`starter-datascope` + `starter-mybatis`）
-- [x] Spring Data JPA 国密存储加密对称性实现（`starter-jpa` + `starter-crypto`）
-- [x] 统一安全上下文自适应互通与 Redis 分布式 Token 黑名单（`starter-secure` + `starter-sso-client`）
-- [x] 通用单点登录客户端 SDK 研制（`starter-sso-client`：URI 白名单 `cleanPath` 安全清洗防绕过、OAuth2 授权码自动换 Token、Cookie/Header 双向映射、`SsoUserContext` 归一化继承 `ZhkjUser`）
-- [x] 生产级声明式分布式锁切面与注解 `@DistributedLock`（`starter-redis`：Lua 脚本持有者 Owner 校验防误删、SpEL 动态 Key、抢锁失败强类型映射为 `BaseFrameworkException` 受控 400 响应）
-- [x] MyBatis-Plus 拦截器严格拓扑编排（强制保持 `Tenant -> DataScope -> Pagination` 执行顺序，彻底杜绝动态注册竞态）
-- [x] 全工程系统性架构治理与安全硬伤排查闭环（拔除 `starter-crypto` 业务代号渗透；SM2/Redis 字符集跨平台 UTF-8 锁死；`SqlKeyword` 静态预编译正则根治 GC 堆抖动；Kafka `failure` 异常状态双清理堵死上下文挂起；全框架 30+ 工具类 `final` 与私有构造器加固；`StringPool` 升级为标准类；双工程 27 模块全绿验收）
-- [x] 微服务内部 RPC 脱敏旁路放行机制落地（`starter-web` 新增 `InternalRpcDesensitizeFilter`，自动识别 `X-Internal-RPC: true` 并配合 `DesensitizeContext` 临时旁路 Jackson 脱敏，finally 恢复与清理，打通服务间协同调用真实数据流）
-- [x] 全架构 Anti-FQCN 纯净化与摘要算法字节流扩充（确立行内零全限定类名绝对红线；`DigestUtil` 原生支持 `sha256(byte[])` 二进制散列）
+### 2. 安全合规与生产级稳定性
+- [x] 数据权限 UPDATE / DELETE 行级 AST 改写与恒假条件防穿透（`starter-datascope` + `starter-mybatis`）
+- [x] Spring Data JPA 国密存储加密（`starter-jpa` + `starter-crypto`，`CryptoAttributeConverter`）
+- [x] 统一安全上下文与 Redis Token 黑名单（`starter-secure` 的 `RedisTokenBlacklistService` + `starter-sso-client`）
+- [x] 通用单点登录客户端（`starter-sso-client`：`cleanPath` 路径规整、授权码换 Token、Cookie/Header 映射、`SsoUserContext` 继承 `ZhkjUser`）
+- [x] 分布式锁切面与注解 `@DistributedLock`（`starter-redis`：Lua 持有者校验、SpEL Key、失败抛出 `DistributedLockException`）
+- [x] MyBatis-Plus 拦截器顺序编排（`Tenant -> DataScope -> Custom -> Pagination`，见 `overview.md` 第 3.4 节）
+- [x] 系统性硬伤治理（默认加解密种子已移除；SM2 与 Redis 监听使用 UTF-8；`SqlKeyword` 正则静态预编译；Kafka `failure` 回调清理上下文；`StringPool`/`CharPool` 改为 final 类）
+- [x] 微服务内部 RPC 脱敏边界收敛：`InternalRpcDesensitizeFilter`（`HIGHEST_PRECEDENCE + 20`）仅接受服务端 `RpcRequestAttribute.DESENSITIZE_AUTHORIZED == Boolean.TRUE`；旧 `X-Internal-RPC: true` 仅为标记，普通 RPC 与公共展示端点默认脱敏。宿主迁移须先认证和授权目标内部端点，再受控设置请求属性并在 `finally` 删除（见 `starter-web.md` 第 11 节）。
+- [x] 委托权限独立为服务端 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED`，机器认证不等于跨租户授权；网关在认证、匿名及 disabled 路径均剥离三个内部头。此里程碑描述代码行为，不替代部署边界验收。
+- [x] Anti-FQCN 规约与摘要字节流（`DigestUtil.sha256(byte[])`）
 
 ### 3. 全链路可观测性与上下文闭环
-- [x] 全链路分布式 TraceId 隐式自动染色与透传闭环（`core` 的 `TraceUtil` + `starter-web` 的 `TraceIdFilter` / `MdcTaskDecorator` + `starter-http` 的 `HttpClientHeaderInterceptor` + `starter-kafka` 的 `ZhkjKafka` / `KafkaTraceRecordInterceptor`）
-- [x] Kafka 消息队列全链路租户与操作人上下文穿透（生产端拦截器写入 Headers，消费端拦截器还原并在 finally 彻底清理防线程复用污染）
-- [x] 多数据库方言兼容性验证套件（`starter-mybatis` 覆盖 MySQL 8、PostgreSQL、DM8 达梦分页与 AST 方言转义改写）
-- [x] 开箱即用轻量级演示工程（`samples/sample-monolith-boot` 单体架构与 `samples/sample-cloud-service` 微服务架构）
+- [x] 全链路 TraceId 透传（`core` 的 `TraceUtil` + `starter-web` 的 `TraceIdFilter` / `MdcTaskDecorator` + `starter-http` 的 `HttpClientHeaderInterceptor` + `starter-kafka` 的 `ZhkjKafka` / `KafkaTraceRecordInterceptor`）
+- [x] Kafka 上下文穿透（生产端拦截器写入 Header，消费端拦截器还原并在 `afterRecord` 清理）
+- [x] 多数据库方言兼容性测试套件（`zhkj-framework-starter-mybatis/src/test` 中的 `DatabaseDialectCompatibilityTest` 覆盖 MySQL 8、PostgreSQL、DM8 达梦分页与 AST 方言改写）
+- [x] 示例工程（`samples/sample-monolith-boot` 单体示例与 `samples/sample-cloud-service` 微服务示例）
 
 ---
 
@@ -44,12 +47,12 @@
 
 - [ ] **多数据库方言压测套件**: 覆盖 Oracle、达梦（DM8）、人大金仓（KingbaseES）高并发分页与 AST 重写基准测试
 - [ ] **全链路指标监控**: 增加 Micrometer Prometheus 与 Grafana 自动化 Dashboard 仪表盘模板
-- [ ] **Spring Batch 6 批处理增强**: 完善分片读写与动态 JobOperator 操作端点
+- [ ] **批处理增强（Spring Batch 6）**: 完善分片读写与动态 JobOperator 操作端点（框架 pom 当前未引入 Spring Batch，承载位置待确认）
 
 ---
 
 ## 🔭 中远期规划 (v2026.5.x)
 
 - **动态插件体系**: 设计基于 Java SPI 与 ClassLoader 隔离的动态热插拔扩展机制
-- **企业级低代码代码生成器**: 基于 AST 与 FreeMarker 打造支持国密加密、多租户与数据权限一键生成的代码生成器
-- **开发者 CLI 脚手架**: 提供交互式终端脚手架命令 `zhkj-cli`，支持秒级拉取业务微服务脚手架
+- **企业级低代码代码生成器**: 基于 AST 与 FreeMarker 打造支持国密加密、多租户与数据权限的代码生成器
+- **开发者 CLI 脚手架**: 提供交互式终端脚手架命令 `zhkj-cli`，用于拉取业务微服务脚手架

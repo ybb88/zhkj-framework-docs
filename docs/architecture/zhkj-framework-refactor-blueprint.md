@@ -3,8 +3,10 @@
 > **版本**：2026.4.1.0-SNAPSHOT  
 > **评估范围**：根 POM 及全部 17 个子模块（核心底座、数据持久化、通信中间件、Web 与契约层）  
 > **审查基准**：Spring Boot 4.x / Java 21 / 根 POM 依赖洁癖 / 单向依赖拓扑 / 零业务污染 / SPI 扩展契约  
-> **状态**：已全面攻坚完成并经双工程 27 模块全量构建验收通过 (100% Completed & Verified)  
+> **状态**：历史归档（原文记录为 100% Completed & Verified；其中“双工程 27 模块全量构建验收通过”的结论本次未能复现，见下方核对说明）  
 > **归档时间**：2026-09-21
+>
+> **核对说明**: 本文件为历史作战记录。各条目下的“实施现状”为对当前工作树的核对结果，原文缺陷描述保持不变。原文中的“全量构建验收通过”结论本次未能复现，构建结果以 CI 为准。
 
 ---
 
@@ -20,6 +22,7 @@
   ```
 - **架构危害**：将上述 Base64 解码后明文为：`zhkj-ncap-crypto-secret-2026`。通用底座框架 `zhkj-framework` 属于跨业务平台的独立基础设施，内部直接硬编码了下游具体业务系统（NCAP 催收业务平台）的工程代号，严重践踏了“底层框架零业务渗透”的最高架构铁律。
 - **治理方案**：统一脱敏并更正为框架级中立种子（如 `zhkj-framework-crypto-secret-2026` 对应的 Base64 编码 `emhrai1mcmFtZXdvcmstY3J5cHRvLXNlY3JldC0yMDI2`），并通过配置中心与环境变量外部化注入。
+- **实施现状**: 已修复。框架源码中未发现 `DEFAULT_SECRET_BASE64` 与 `zhkj-ncap` 字样。
 
 ### 2. 【国密跨平台乱码与解密失败】SM2 加解密未指定 Charset 导致跨平台乱码
 - **缺陷坐标**：`starter-crypto/.../SM2Util.java`
@@ -32,6 +35,7 @@
   ```
 - **架构危害**：直接调用无参 `getBytes()` 与 `new String(byte[])`，将直接采用当前运行 JVM 的平台默认编码（在 Windows 或国内特定容器环境中常为 GBK 或 GB2312）。当客户端与服务端分别运行在 Windows 与 Linux（UTF-8）时，将直接引发签名校验失败与解密报文严重乱码甚至崩溃。
 - **治理方案**：强制显式指定 `StandardCharsets.UTF_8`。
+- **实施现状**: 已修复。`SM2Util.java:124` 使用 `StandardCharsets.UTF_8`；`zhkj-framework-*/src/main` 中无无参 `getBytes()` 调用。
 
 ### 3. 【高并发上下文污染与泄露】Kafka 单条消息消费异常引发上下文悬挂
 - **缺陷坐标**：`starter-kafka/.../KafkaTraceRecordInterceptor.java`
@@ -45,6 +49,7 @@
   ```
 - **架构危害**：在 Spring Kafka 消费模型中，当业务 Listener 发生未捕获异常并交由全局 `CommonErrorHandler` 处理时，`afterRecord` 回调可能被绕过。类中未覆写 `failure(record, exception, consumer)`，导致异常发生后 `FrameworkContext` 和 MDC 残留在当前 Worker 线程中，污染下一个复用该线程的消息。
 - **对比证据**：同模块的 `KafkaTraceBatchInterceptor.java` 正确覆写了 `success` 与 `failure` 双清理，单条拦截器存在实现缺陷。
+- **实施现状**: 已修复。`KafkaTraceRecordInterceptor.java:117` 已覆写 `failure(...)`，并通过 `clearContext()` 清理上下文。
 
 ### 4. 【高并发数据库查询 GC 击穿】MyBatis 关键字过滤拦截器高频编译正则
 - **缺陷坐标**：`starter-mybatis/.../SqlKeyword.java`
@@ -57,6 +62,7 @@
   ```
 - **架构危害**：`SqlKeyword.filter` 在构建动态 QueryWrapper 时处于极高频调用路径。代码在每次调用时均通过动态拼接 `"(?i)" + SQL_REGEX` 并执行 `String.replaceAll()`。这将在运行期导致每次调用都重新分配并编译一个昂贵的 Pattern 和 Matcher 实例，在批量查询或高并发作业时触发严重的堆内存抖动与频繁 Minor GC。
 - **治理方案**：提取为静态预编译常量 `private static final Pattern SQL_KEYWORD_PATTERN = Pattern.compile("(?i)(" + SQL_REGEX + ")");`，使用预编译正则复用。
+- **实施现状**: 已修复。`SqlKeyword.java:21` 为静态 `Pattern`，`:98` 使用 `matcher(...).replaceAll(...)`。
 
 ### 5. 【数据权限拦截器 ThreadLocal 无 cleanUp 导致线程池悬挂】
 - **缺陷坐标**：`starter-datascope/.../MybatisDataScopeInterceptor.java`
@@ -70,6 +76,7 @@
   }
   ```
 - **架构危害**：虽然设计了阈值清空，但整个拦截器在 SQL 执行完成后从未执行 `processedBoundSqls.remove()`。在 Tomcat/Undertow 容器或连接池常驻工作线程中，ThreadLocal 永远驻留线程内部；同时，方法内每次都直接通过 `SpringUtil.getBean(AuditUserProvider.class)` 执行 Spring 容器反射查找，未进行对象持有或 `ObjectProvider` 优化，在高并发持久层链路造成不必要的性能开销。
+- **实施现状**: 部分修复。拦截器实际位于 `zhkj-framework-starter-mybatis`（`datascope/interceptor/MybatisDataScopeInterceptor.java`）。`PROCESSED_BOUND_SQLS` 已改为静态 `ThreadLocal` 并通过 `FrameworkContext.registerCleaner` 注册清理（`:49-53`）；`AuditUserProvider` 已通过 `ObjectProvider<AuditUserProvider>` 注入（`:61`、`:214`），仅在 provider 为空时回退 `SpringUtil.getBean`（`:217`）。
 
 ---
 
@@ -78,23 +85,27 @@
 ### 1. 工具类架构规范缺失（全工程共性硬伤）
 - **构造函数未私有化 & 缺失 final 修饰**：全框架 30 余个 `*Util` 类（包括 `JsonUtil`、`StringUtil`、`BeanUtil`、`WebUtil`、`INetUtil` 等），未显式声明为 `public final class`，且未声明私有构造器（默认由编译器生成 public 无参构造函数），部分类（如 `DateUtil`）使用 protected 构造函数。
 - **常量接口反模式 (Constant Interface Anti-Pattern)**：`StringPool.java` 与 `CharPool.java` 目前定义为 `public interface`，严重违背《Effective Java》第 22 条规约，应重构为带私有构造器的 `public final class`。
+- **实施现状**: 大部分已修复。`StringPool`、`CharPool` 已为 `public final class`。`*Util` 类均为 `final`，除 `SpringUtil.java:15` 外均声明私有构造器。
 
 ### 2. 根 POM 依赖洁癖与配置重复
 - **子模块打破统一版本继承**：`zhkj-framework-core/pom.xml` 违规在子 POM 内显式声明了 `<version>${lombok.version}</version>`，且重复声明了根 POM 中已由 `<pluginManagement>` 集中纳管的 `maven-compiler-plugin` 处理器路径。
 - **根 POM `<dependencyManagement>` 冗余幽灵声明**：
   - 根 POM 声明了 `jjwt-jackson`，但全工程所有模块均已切换至基于 Jackson 3 原生的 `ToolsJacksonSerializer` / `ToolsJacksonDeserializer`，`jjwt-jackson` 属于陈旧声明，一旦被下游误引将拉入 Jackson 2 发生依赖污染。
   - `commons-beanutils` 属于历史遗留高危反序列化依赖，底座完全不应托管。
+- **实施现状**: 已修复。根 POM 中未声明 `jjwt-jackson`、`commons-beanutils`；子模块 POM 未发现字面量版本号。经检索框架与 NCAP 全部 POM，引用未定义版本属性的 Batik（`batik-all` / `batik-svgpp`）、XML Graphics Commons、XML Security、XXL-Job、P6Spy 均无消费声明，对应六项依赖管理已删除，不补猜版本。
 
 ### 3. 日期时间与 Web 辅助类代码异味
 - **DateUtil 命名与解析性能异味**：
   - `DateUtil.java` 中存在首字母大写的非标准方法命名 `public static String DateToString(...)`。
   - 第 386 行 `new SimpleDateFormat(pattern).parse(dateStr)`，在解析未命中预设格式时频繁创建非线程安全对象，未利用现代 Java 21 `DateTimeFormatter` 缓存。
 - **WebUtil 字符串替换 GC 浪费**：`WebUtil.java` 中多次使用 `.replaceAll("&amp;", "&")` 和 `.replaceAll("%22", "\"")` 进行纯字面量替换，触发无意义的正则表达式编译。
+- **实施现状**: 已修复。`DateUtil.dateToString` 存在，`DateToString` 为 `@Deprecated(since = "2026.4.1.0", forRemoval = true)` 转发方法（`DateUtil.java:604-607`）；`DateUtil` 中未发现 `SimpleDateFormat` 实例化；`WebUtil.java:244` 使用 `String.replace`。
 
 ### 4. 自动装配规范与版本硬编码
 - **Jackson 配置类装配注解不纯粹**：`JacksonConfiguration.java` 使用了 `@Configuration(proxyBeanMethods = false)` 而非 Spring Boot 4 推荐的 `@AutoConfiguration` 规范。
 - **Nacos 元数据版本号硬编码**：`ZhkjNacosAutoConfiguration.java` 存在代码内硬编码字符串 `"2026.4.1.0"`。
 - **Spring Boot 3/4 双重 imports 文件残留**：`starter-crypto` 目录下同时存留 `org.springframework.boot.env.EnvironmentPostProcessor.imports`（Spring Boot 3 废弃路径）与 `org.springframework.boot.EnvironmentPostProcessor.imports`（Spring Boot 4 现代路径）。
+- **实施现状**: 已修复。`JacksonConfiguration.java:35` 为 `@AutoConfiguration`；`ZhkjNacosAutoConfiguration` 中未发现版本号字面量；`starter-crypto` 的旧路径 `org.springframework.boot.env.EnvironmentPostProcessor.imports` 已不存在，现存注册文件为 `META-INF/spring/org.springframework.boot.EnvironmentPostProcessor.imports`；另 `META-INF/spring.factories` 仍注册同一 `EnvironmentPostProcessor`（[待确认] 是否为需移除的重复注册）。
 
 ---
 
@@ -123,6 +134,7 @@ Stage 1: 根 POM 治理与核心底座固化 (当前开局战役)
   4. 对 Core 层 20 余个工具类全面固化 `public final class` 与 `private XxxUtil() {}` 防御。
   5. 修正 `DateUtil` 命名规范（`DateToString` $\rightarrow$ `dateToString`）与 `SimpleDateFormat` 线程安全重构。
   6. 治理 `JsonUtil` 异常体系，防止向外抛出裸 `RuntimeException`。
+  - 实施现状: 1-3、5 已完成（`jjwt-jackson`/`commons-beanutils` 已移除；`StringPool`/`CharPool` 为 final；`DateUtil.dateToString` 已提供）；4 的 `*Util` 加固完成（`SpringUtil` 除外）；6 `JsonUtil` 抛出 `JsonParseException`（`JsonUtil.java:160,174,186`，该类继承 `ServiceException`）。
 
 ### 阶段二：数据持久化与国密底层引擎治理 (Persistence & Crypto)
 - **涉及模块**：`starter-crypto`、`starter-datascope`、`starter-tenant`、`starter-datasource`、`starter-mybatis`、`starter-jpa`。
@@ -133,15 +145,20 @@ Stage 1: 根 POM 治理与核心底座固化 (当前开局战役)
   4. 在 `SqlKeyword` 中将 `SQL_REGEX` 转为静态预编译 `Pattern`，彻底消除动态编译 GC 抖动。
   5. 重构 `MybatisDataScopeInterceptor`：移除未妥善清理的 ThreadLocal，转用生命周期明确的上下文持有模型，使用 `ObjectProvider` 缓存 `AuditUserProvider`。
   6. 为 `ShardingSphereYamlRepresenter` 补全上游 Apache 官方 Issue 追踪超链接。
+  - 实施现状: 1 已完成（种子已移除）；2 已完成（`SM2Util.java:124`）；3 已完成；4 已完成（`SqlKeyword`）；5 部分完成（见第一节第 5 条）；6 待确认（`ShardingSphereYamlRepresenter.java:48` 已标注 `@Deprecated(since = "2026.4.1.0", forRemoval = true)`，Issue 链接未核对）。
 
 ### 阶段三：通信中枢、消息与分布式安全集群 (Middleware & Security)
 - **涉及模块**：`starter-redis`、`starter-kafka`、`starter-http`、`starter-nacos`、`starter-secure`、`starter-sso-client`。
 - **核心动作**：
   1. 在 `KafkaTraceRecordInterceptor` 中实现完整的 `failure(ConsumerRecord, Exception, Consumer)` 异常状态清理回调，堵死上下文泄露。
   2. 修复 `RPubSubListenerDetector` 中 `new String(message.getChannel())` 未指定 UTF-8 编码的问题。
+  - 实施现状: 已完成（`RPubSubListenerDetector.java:50` 使用 `StandardCharsets.UTF_8`）。
   3. 解耦 `SecureUtil` 的“静态工具类 + Spring 单例”混杂架构，梳理 Token 生成与验证的纯粹边界。
+  - 实施现状: 部分（`SecureUtil.java:50` 仍为静态工具类，静态 `getUser`/`setUser` 委托 `SecurityContextHolder`，见 `SecureUtil.java:132-143`；边界梳理结论 [待确认]）。
   4. 消除 `ZhkjNacosAutoConfiguration` 中的框架版本号硬编码，改为动态获取当前构件版本。
+  - 实施现状: 已完成（`ZhkjNacosAutoConfiguration` 中未发现版本号字面量）。
   5. 对 `SsoTokenParser`、`ChannelUtil` 等工具类补全 final 与私有构造器。
+  - 实施现状: `ChannelUtil`、`SsoTokenParser` 均为 `public final class` 且声明私有构造器（`ChannelUtil.java:12-14`、`SsoTokenParser.java:23-25`）。
 
 ### 阶段四：Web 表现层与契约开放网关 (Web & Contract)
 - **涉及模块**：`starter-web`、`starter-openapi`。
@@ -150,6 +167,7 @@ Stage 1: 根 POM 治理与核心底座固化 (当前开局战役)
   2. 重构 `WebUtil`：将所有的 `replaceAll("&amp;", "&")` 等正则替换降级为轻量级的 `String.replace(...)` 字符序列替换。
   3. 对 `WebUtil`、`SpringWebUtil`、`ApiCryptoUtil`、`MultipartFileUtil` 强化不可继承与私有构造器约束。
   4. 审计 `ApiCryptoUtil` 中的 `PROCESSOR_CACHE` 缓存键生命周期。
+  - 实施现状: 1 已完成（`JacksonConfiguration` 为 `@AutoConfiguration`）；2 已完成（`WebUtil` 使用 `replace`）；3 已完成（`WebUtil`、`SpringWebUtil`、`ApiCryptoUtil`、`MultipartFileUtil` 为 final 且具私有构造器）；4 已有上限与超限降级策略（`MAX_CACHE_SIZE=32`，超限返回临时处理器；提供 `clearCache()`，`ApiCryptoUtil.java:26-28、60-62、70-71`），缓存键生命周期结论 [待确认]。
 
 ---
 
@@ -159,6 +177,7 @@ Stage 1: 根 POM 治理与核心底座固化 (当前开局战役)
 - **破坏性性质**：二进制兼容（Binary Compatible），但若存在历史代码以 `implements StringPool` 的“常量接口”方式反模式使用，修改后将导致其编译失败。
 - **影响评估**：静态扫描已确认，整个 `zhkj-framework` 内部 0 处类 `implements StringPool`，所有调用均采用 `StringPool.DOT` 静态字段点选语法。
 - **平滑建议**：直接变更为 `public final class StringPool { private StringPool() {} ... }`；若下游个别类违规 implements，只需删除声明并改为静态导入 `import static io.github.ybb88.framework.util.lang.StringPool.*`。
+- **实施现状**: 已完成。`StringPool`、`CharPool` 为 `final class`。
 
 ### 2. DateUtil.DateToString 方法驼峰重构
 - **破坏性性质**：源码与签名级破坏（Source & Binary Breaking）。
@@ -171,11 +190,13 @@ Stage 1: 根 POM 治理与核心底座固化 (当前开局战役)
       return dateToString(date, pattern);
   }
   ```
+- **实施现状**: 已完成（`DateUtil.java:604-607`）。
 
 ### 3. JsonUtil 异常体系标准化收敛
 - **破坏性性质**：行为兼容微调（Behavioral Change）。
 - **当前现状**：`JsonUtil` 中捕获 `JacksonException` 后抛出 `new RuntimeException(...)`。
 - **平滑建议**：定义或沿用框架统一的非受检转换异常（如 `JsonParseException` 继承 `ServiceException`，而 `ServiceException` 继承 `RuntimeException`），既满足下游已有 `catch (RuntimeException e)` 不中断，又建立起底层框架统一规范的异常根基。
+- **实施现状**: 已完成。`JsonUtil.java:160,174,186` 抛出 `JsonParseException`。
 
 ---
 

@@ -1,6 +1,6 @@
 # ZHKJ Framework 多租户隔离与细粒度数据权限体系
 
-> **文档定位**: 企业级多租户物理/逻辑隔离、行级过滤拦截器顺序治理、JSqlParser AST 抽象语法树动态 SQL 重写与组织拓扑 SPI 深度指南  
+> **文档定位**: 多租户行级隔离、拦截器拓扑编排、JSqlParser AST 动态 SQL 改写与部门祖先 SPI 深度指南  
 > **设计与创作者**: Jason.Yang（274107098@qq.com）  
 
 ---
@@ -8,9 +8,9 @@
 ## 🏢 1. 多租户全生命周期治理 (`starter-tenant` + `starter-mybatis`)
 
 ### 1.1 核心设计理念
-框架将多租户架构分为两层：
-- **框架无关核心层 (`starter-tenant`)**: 负责多租户上下文的接收、存储、校验与 SPI 规则匹配；
-- **持久层适配插件 (`starter-mybatis` / `starter-jpa`)**: 作为轻量级插件，根据核心层契约在 SQL 生成期或 ORM 会话中自动追加租户隔离条件。
+框架将多租户分为两层：
+- **框架无关核心层 (`starter-tenant`)**: 负责租户上下文（`TenantContext`）的存储、租户解析（`HeaderTenantResolver`、`SubdomainTenantResolver`）与规则 SPI（`TenantRuleProvider`，默认实现 `DefaultTenantRuleProvider`）；
+- **持久层适配插件 (`starter-mybatis` / `starter-jpa`)**: 根据核心层契约在 SQL 生成期（MyBatis-Plus `TenantLineInnerInterceptor`）或 ORM 会话中（JPA Hibernate Filter）追加租户隔离条件。
 
 ```
                     ┌─────────────────────────┐
@@ -26,50 +26,72 @@
                  ▼                               ▼
        ┌───────────────────┐           ┌───────────────────┐
        │   MyBatis-Plus    │           │  Spring Data JPA  │
-       │ TenantLineHandler │           │  Hibernate Filter │
+       │ MybatisTenantHandler│         │  Hibernate Filter │
        └───────────────────┘           └───────────────────┘
 ```
 
 ### 1.2 行级隔离与双模探测自愈机制
-在现实微服务中，可能存在无 Servlet 请求上下文的场景（如 Spring Batch 批处理、Kafka 异步消息消费或 `@Async` 线程池）。此时直接放行会导致严重的数据越权！
-框架的 `MybatisTenantHandler` 实现了**双模自愈探测机制**：
-1. 首先读取 `TenantContext.getTenantId()`；
-2. 若为空，自动动态降级探测安全上下文 `SecurityContextHolder.getTenantId()`；
-3. 若安全上下文中持有租户身份，立即执行**自动自愈回填** `TenantContext.setTenantId(...)` 并强制执行行级数据过滤（`WHERE tenant_id = 'xxx'`），彻底杜绝多租户越权漏洞。
+在无 Servlet 请求上下文的场景（如批处理、Kafka 消费、`@Async` 线程池）中，若直接放行会导致越权。`MybatisTenantHandler` 的处理逻辑：
+1. 注册了 `TenantRuleProvider` 时（常规装配），`MybatisTenantHandler.getTenantId()` 委托 `ruleProvider.resolveTenantId()`（`MybatisTenantHandler.java` 第 49–55 行）。`DefaultTenantRuleProvider.resolveTenantId()` 依次读取受控委托租户、`TenantContext`，再降级读取 `FrameworkContext` 快照中的安全身份租户并回填 `TenantContext`，最后返回默认租户 `0`（`DefaultTenantRuleProvider.java` 第 112–131 行，`TenantConstant.DEFAULT_TENANT_ID`）。
+2. 未注册 `TenantRuleProvider` 时（裁剪自动配置的内建路径），按受控委托租户 → `TenantContext` → `FrameworkContext` 快照（`resolveTenantIdFromSecurityContext()`，第 185 行）顺序取值（第 58–66 行）；快照租户回填由 `autoSyncTenantContext()`（第 193 行）完成。
+3. 配置项 `zhkj.tenant.mybatis.default-tenant-id`（默认 `00000000`）仅在处理器仍取不到租户 ID 时兜底（第 53、70 行），不覆盖提供者已返回的 ID。
+4. `ignoreTable()`：注册 `TenantRuleProvider` 时委托其裁决，`DefaultTenantRuleProvider` 在无租户上下文时返回 `true`（`DefaultTenantRuleProvider.java` 第 92–94 行）；未注册时内建路径在无租户上下文时同样返回 `true`（`MybatisTenantHandler.java` 第 146–148 行）。返回 `true` 的 SQL 不附加租户条件。
 
-### 1.3 拦截器链严格拓扑编排（杜绝注入竞态）
-在 Spring 容器中，租户拦截器与数据权限拦截器可能由不同配置类注入。框架通过动态索引编排机制，强制保证物理链拓扑：
-$$\mathbf{TenantLineInnerInterceptor} \longrightarrow \mathbf{MybatisDataScopeInterceptor} \longrightarrow \mathbf{PaginationInnerInterceptor}$$
-- **租户拦截器绝对处于第 0 位**：租户隔离是最高级别的物理/逻辑边界，必须先于租户内的数据权限过滤与分页截断生效。
+### 1.3 拦截器链拓扑编排
+拦截器链的实际装配见 `docs/architecture/overview.md` 第 3.4 节：
+$$\mathbf{TenantLineInnerInterceptor} \longrightarrow \mathbf{MybatisDataScopeInterceptor} \longrightarrow \mathbf{Custom} \longrightarrow \mathbf{PaginationInnerInterceptor}$$
+- 租户拦截器先于数据权限拦截器、分页拦截器生效，保证分页计数也携带租户条件。
 
-### 1.4 基础配置示例
+### 1.4 配置示例
+租户相关配置项的前缀与绑定类：
+
+| 配置前缀 | 绑定类 | 常用项 |
+| :--- | :--- | :--- |
+| `zhkj.tenant` | `TenantProperties` | `enabled`（默认 `true`）、`default-isolation-mode`、`resolvers`（默认 `header`、`subdomain`）、`tenants`、`field-isolation` |
+| `zhkj.tenant.mybatis` | `MybatisTenantProperties` | `column`（默认 `tenant_id`）、`tables`、`ignore-tables`、`default-tenant-id`（默认 `00000000`） |
+
 ```yaml
 zhkj:
   tenant:
     enabled: true
-    column: "tenant_id"
-    ignore-tables:
-      - "sys_dict"
-      - "sys_region"
-      - "sys_tenant"
+    mybatis:
+      column: tenant_id
+      ignore-tables:
+        - sys_dict
+        - sys_region
+        - sys_tenant
 ```
+
+### 1.5 JPA 自动过滤与实体生命周期
+
+`JpaTenantEntity` 直接声明 Hibernate `@FilterDef(autoEnabled = true, applyToLoadByKey = true)` 与 `@Filter`，每个 Session 自动参与隔离。`JpaTenantIdResolver` 按当前 `TenantRuleProvider` 解析有效租户，`JpaTenantFilterEnabledResolver` 只读取启动配置 `zhkj.tenant.enabled`；不注册 MVC 拦截器，不强制开启 OSIV。
+
+启用时 provider 返回空租户会拒绝操作，默认 provider 缺少上下文时仍隔离到其默认租户 `0`。`TenantEntityListener` 在新增时填充并校验租户，在更新时校验当前租户、实体字段及原始持久化归属；不匹配直接阻断。关闭隔离不影响公共实体 `JpaBaseEntity` 的持久化。
+
+请求结束使用现有 FrameworkContext 清理机制；resolver 不保存前一请求租户。切换租户使用独立事务和 EntityManager，避免一级缓存复用；原生 SQL 和绕过实体生命周期的批量 DML 需显式携带租户条件。完整配置与范围见 [JPA 组件](../starters/starter-jpa.md)。
 
 ---
 
-## 📊 2. 细粒度数据权限体系 (`starter-datascope`)
+## 📊 2. 细粒度数据权限体系 (`starter-datascope` + `starter-mybatis`)
 
-### 2.1 架构设计：JSqlParser AST 语法树重写
-传统框架常使用裸字符串拼接（如 `String.format(" AND dept_id IN (%s)", ...)`），极易引发 SQL 语法错误或 SQL 注入漏洞。
-`zhkj-framework` 全面采用 **JSqlParser 抽象语法树（AST）** 解析引擎：
-1. 拦截带有 `@DataAuth` 的 Mapper 方法或业务查询；
-2. 解析原始 SQL 为 AST 语法树结构；
-3. 将数据权限条件（本部门、本部门及子部门、仅本人、自定义等）构建为安全的 `BinaryExpression` 节点；
-4. 递归合并进主查询或子查询的 `WHERE` 条件中，保障生成的 SQL 100% 语法严密、零注入风险。
+### 2.1 架构设计：JSqlParser AST 语法树改写
+框架使用 JSqlParser 解析 SQL 为抽象语法树（AST），在 `WHERE` 条件中合并数据权限表达式，而非拼接字符串：
+1. 数据权限注解 `@DataAuth` 标注的方法或类，在 MyBatis 拦截器（`MybatisDataScopeInterceptor`）中被识别；
+2. 通过 `SqlDataScopeAstEngine` 解析原 SQL 并改写；
+3. 标识符通过 `DataScopeSqlUtil` 校验（仅允许 `[a-zA-Z0-9_]`）。
 
 ### 2.2 组织架构解耦：`DeptAncestorProvider` SPI
-框架基础层严禁硬编码任何特定业务部门表（如 `sys_org`、`sys_dept`）或特定字段。
-业务系统只需实现框架提供的 SPI 接口，即可适配任意企业特定的组织树拓扑模型：
+框架基础层通过 SPI 获取部门层级，不写死业务部门表。接口定义（`datascope/provider/DeptAncestorProvider.java`）：
 
+```java
+@FunctionalInterface
+public interface DeptAncestorProvider {
+    /** 获取指定部门及其所有子孙部门的 ID 列表（包含目标部门本身） */
+    List<Long> getDeptAncestors(Long deptId);
+}
+```
+
+业务系统实现该接口即可适配任意组织树模型：
 ```java
 @Component
 public class CustomDeptAncestorProvider implements DeptAncestorProvider {
@@ -78,25 +100,52 @@ public class CustomDeptAncestorProvider implements DeptAncestorProvider {
     private SysDeptMapper deptMapper;
 
     @Override
-    public List<Long> getSubDeptIds(Long deptId) {
-        // 业务工程自由根据自身表结构（祖籍列表 ancestors 或闭包表）获取所有子部门 ID
-        return deptMapper.selectChildDeptIds(deptId);
+    public List<Long> getDeptAncestors(Long deptId) {
+        // 业务工程根据自身表结构（ancestors 列或闭包表）返回目标部门及子孙部门 ID
+        return deptMapper.selectSelfAndDescendantIds(deptId);
     }
 }
 ```
 
-### 2.3 注解使用实战 (`@DataAuth`)
-在 Mapper 查询接口上直接声明 `@DataAuth`，框架自动注入过滤逻辑：
+未注册 `DeptAncestorProvider` 实现时，框架基于 `DataScopeProperties` 配置的表与列执行动态 SQL 方案（见下表）。
+
+### 2.3 配置项 (`zhkj.datascope`)
+`DataScopeProperties` 配置项（默认值以源码为准）：
+
+| 配置项 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `enabled` | `false` | 数据权限总开关 |
+| `dept-table` | `sys_org` | 部门表名（存量默认值，见下方说明） |
+| `dept-id-column` | `id` | 部门 ID 列 |
+| `dept-ancestors-column` | `ancestors` | 祖先路径列 |
+| `dept-logic-delete-column` / `dept-logic-delete-value` | `is_deleted` / `0` | 部门表逻辑删除列与未删除值 |
+| `scope-data-table` | `zhkj_scope_data` | 数据范围表（存量默认值） |
+| `role-scope-table` | `zhkj_role_scope` | 角色数据范围表（存量默认值） |
+| `mapper-key` | `page`, `Page`, `list`, `List`, `update`, `Update`, `delete`, `Delete` | 参与改写的 Mapper 方法名匹配关键字 |
+| `mapper-exclude` | `FlowMapper` | 排除的 Mapper 名 |
+
+> 存量待治理: 上表中 `dept-table`、`scope-data-table`、`role-scope-table` 的默认值为业务相关表名，框架层规约要求不硬编码业务表名，需改为无默认值或显式配置。
+
+### 2.4 注解使用 (`@DataAuth`)
+`@DataAuth` 可标注在方法或类上（`@Target({METHOD, TYPE})`），属性如下（`datascope/annotation/DataAuth.java`）：
+
+| 属性 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `enabled` | `true` | 是否启用 |
+| `code` | `""` | 资源编号 |
+| `column` | `DataScopeConstant.DEFAULT_COLUMN` | 数据权限对应字段 |
+| `type` | `DataScopeEnum.ALL` | 数据权限规则 |
+| `field` | `"*"` | 可见字段 |
+| `value` | `""` | 数据权限规则值域 |
+
+`DataScopeEnum` 取值：`ALL`（全部）、`OWN`（本人可见）、`OWN_DEPT`（所在机构可见）、`OWN_DEPT_CHILD`（所在机构及子级可见）、`CUSTOM`（自定义）。
 
 ```java
 @Mapper
 public interface CustomerMapper extends BaseMapper<CustomerEntity> {
 
-    /**
-     * 根据当前登录用户的角色数据权限范围（全部/本部门及下级/仅本人）自动追加过滤条件
-     */
-    @DataAuth(deptField = "dept_id", userField = "create_by")
-    List<CustomerEntity> selectCustomerPage(IPage<CustomerEntity> page, @Param("param") CustomerQueryDTO param);
+    @DataAuth(column = "dept_id", type = DataScopeEnum.OWN_DEPT_CHILD)
+    List<CustomerEntity> selectCustomerList(@Param("param") CustomerQueryDTO param);
 }
 ```
 
@@ -106,7 +155,7 @@ public interface CustomerMapper extends BaseMapper<CustomerEntity> {
 
 | 场景 | 租户隔离行为 | 数据权限过滤行为 | 上下文清理保障 |
 | :--- | :--- | :--- | :--- |
-| **标准 HTTP 请求** | 从请求头 `X-Tenant-Id` 提取，自动追加 `tenant_id = ?` | 从用户角色配置解析，追加部门/人员限制 | `FrameworkContextClearFilter` 在 `finally` 强制清空 |
-| **异步线程池 (`@Async`)** | 通过 `FrameworkContext.capture()` 捕获快照并还原 | 快照完整携带权限模型与票据信息 | `try (scope)` 离开作用域自动清空，防复用污染 |
-| **Kafka 消息消费** | 生产者写入 Record Headers，消费者自动还原 | 随消费者上下文还原 | `KafkaTraceRecordInterceptor` 在 `afterRecord` 强制清空 |
-| **特权导出 / 全局查询** | 使用 `TenantContext.runWithTenant(...)` 显式受控切换 | 使用 `DataScopeContext` 显式受控调整 | 执行完毕自动还原先前上下文，防线程残留 |
+| **标准 HTTP 请求** | 从请求头 `X-Tenant-Id` 解析（`HeaderTenantResolver`） | 通过 `ScopeModelHandler` 等 SPI 解析当前用户数据范围 | `FrameworkContextClearFilter` 调用 `FrameworkContext.clearAll()` |
+| **异步线程池 (`@Async`)** | 通过 `FrameworkContext.capture()` 捕获快照并在子线程还原 | 快照携带数据范围模型 | `try (ContextScope)` 离开作用域后清理 |
+| **Kafka 消息消费** | 生产端写入 Record Headers，消费端还原 | 随消费者上下文还原 | `KafkaTraceRecordInterceptor` 在 `afterRecord` 中调用 `FrameworkContext.clearAll()` |
+| **特权操作（受控切换）** | `TenantContext.runWithTenant(tenant, runnable)` 显式切换并自动还原 | `DataScopeContext.setDataScope(...)` 显式设置，使用后 `DataScopeContext.clear()` | 作用域结束后还原先前上下文 |

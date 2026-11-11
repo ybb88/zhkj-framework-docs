@@ -1,40 +1,20 @@
 # 数据安全与国密加解密：zhkj-framework-starter-crypto
 
-> **模块定位**: 全生命周期数据安全中心 Starter，提供“配置态透明解密 (`ENC(...)`) + 展示态动态脱敏 (`@Desensitize`) + 存储态国密透明加密与 HMAC-SM3 盲索引强一致检索”三层一体化合规防护。  
-> **适用基准**: OpenJDK 21 (LTS), Spring Boot 4.1.1, BouncyCastle 国密算法库  
+> **模块定位**: 数据安全 Starter，提供配置文件 `ENC(...)` 启动期解密、存储态字段加密（AES / SM4）与 HMAC 盲索引、HTTP 报文加解密所需的算法与配置。展示态脱敏 `@Desensitize` / `DesensitizeType` 位于 `zhkj-framework-core`（`io.github.ybb88.framework.desensitize`），不在本模块内；报文加解密的 Controller 切面位于 `zhkj-framework-starter-web`。  
+> **适用基准**: OpenJDK 21, Spring Boot 4.1.1, BouncyCastle 1.78.1（`bcprov-jdk18on` / `bcpkix-jdk18on`）  
 > **模块坐标**: `io.github.ybb88:zhkj-framework-starter-crypto`
 
 ---
 
-## 📋 1. 架构定位与三层防护模型
+## 📋 1. 模块职责与三类能力
 
-在现代金融与企业级分布式应用中，隐私保护与数据合规是生命线。`zhkj-framework-starter-crypto` 统一纳管所有加解密核心组件：
+| 能力 | 入口 | 说明 |
+|------|------|------|
+| 配置态解密 | `EncryptablePropertyEnvironmentPostProcessor` | 启动期将配置中的 `ENC(...)` 值替换为明文 |
+| 存储态加密 | `StorageCryptoEngine`、`@EncryptField`、`@BlindIndex` | 字段落库加密；盲索引供等值检索 |
+| 报文加解密 | `@ApiEncrypt` / `@ApiDecrypt`、`ApiCryptoProcessor` | 算法执行与密钥解析；Controller 切面位于 `starter-web` |
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 1. 配置态 (Configuration Layer)                                         │
-│    - 本地 YAML 或 Nacos 敏感参数使用 ENC(...) 加密；                      │
-│    - 基于 Spring Boot 4 原生 EnvironmentPostProcessor 在启动期透明解密。 │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 2. 传输与展示态 (Transmission & Presentation Layer)                     │
-│    - 展示态: Jackson 序列化输出时通过 @Desensitize 动态打码 (手机/身份证等) │
-│    - 内部微服务 RPC: 携带 X-Internal-RPC: true 自动旁路放行明文；        │
-│    - 传输态: 通过 @ApiEncrypt / @ApiDecrypt 实现 Controller 报文对称加密。│
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 3. 存储与检索态 (Persistence & Storage Layer)                           │
-│    - 密文落盘: 实体字段通过 EncryptTypeHandler (国密 SM4/AES) 透明加密； │
-│      加密引擎具备事务安全阻断机制，发生异常坚决抛出 CryptoException，    │
-│      绝不向数据库降级写入明文，防范明文脱库合规事故；                   │
-│    - 盲索引检索: 辅助列通过 HMAC-SM3 加盐哈希生成强一致性盲索引 (*_hash)│
-│      由 ZhkjMetaObjectHandler 自动注入，仅允许确定性精确等值 (EQ) 查询。 │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+盲索引通用工具 `BlindIndexUtil` 位于 `zhkj-framework-core`（`io.github.ybb88.framework.util.crypto.BlindIndexUtil`），本模块仅注册其 SM3 实现。
 
 ---
 
@@ -53,86 +33,161 @@
 
 ```
 io.github.ybb88.framework.crypto
-├── property/                                  # 1. 配置文件启动期解密
-│   ├── EncryptablePropertyEnvironmentPostProcessor.java # 现代 EnvironmentPostProcessor 实现
-│   ├── EncryptablePropertySource.java         # 属性源透明代理
-│   ├── ZhkjPropertyEncryptor.java             # 属性解密执行器
-│   └── ZhkjCryptoCli.java                     # 密文生成 CLI 工具类
-├── sm4/                                       # 2. 国密 SM4 核心与环境嗅探
-│   └── SM4Util.java                           # SM4 ECB/CBC 算法实现与 isSm4Available() 探测
-├── storage/                                   # 3. 数据库持久层密文存储与盲索引
+├── property/                                   # 配置态解密
+│   ├── EncryptablePropertyEnvironmentPostProcessor.java  # EnvironmentPostProcessor
+│   ├── EncryptablePropertySource.java          # 属性源包装（非 Map 类型）
+│   ├── EncryptableMapPropertySource.java       # 属性源包装（MapPropertySource）
+│   ├── ZhkjPropertyEncryptor.java              # AES 解密执行器（密钥由 SHA-256 派生）
+│   ├── ZhkjPropertyCryptoProperties.java       # zhkj.crypto.property.*
+│   └── ZhkjCryptoCli.java                      # 命令行加解密工具
+├── storage/                                    # 存储态加密与盲索引
 │   ├── annotation/
-│   │   ├── EncryptField.java                  # 实体敏感存储加密字段标记
-│   │   └── BlindIndex.java                    # 盲索引辅助列映射
-│   ├── engine/
-│   │   └── StorageCryptoEngine.java           # 存储加密核心引擎 (硬性事务安全阻断)
+│   │   ├── EncryptField.java                   # 标记加密字段
+│   │   └── BlindIndex.java                     # 标记盲索引目标/来源字段
+│   ├── config/ZhkjStorageCryptoAutoConfiguration.java
+│   ├── props/ZhkjStorageCryptoProperties.java  # zhkj.storage.crypto.*
+│   ├── engine/StorageCryptoEngine.java         # 加解密主引擎（静态）
 │   ├── spi/
-│   │   ├── CryptoAlgorithmProvider.java       # 加密算法扩展 SPI
-│   │   ├── Sm4CryptoAlgorithmProvider.java    # 国密 SM4 实现
-│   │   └── AesCryptoAlgorithmProvider.java    # AES 实现
+│   │   ├── CryptoAlgorithmProvider.java        # 存储算法 SPI
+│   │   ├── AesCryptoAlgorithmProvider.java     # AES 实现
+│   │   ├── Sm4CryptoAlgorithmProvider.java     # SM4 实现
+│   │   └── Sm3BlindIndexProvider.java          # HMAC-SM3 盲索引（BlindIndexProvider SPI）
 │   └── util/
-│       ├── BlindIndexUtil.java                # HMAC-SM3 加盐哈希盲索引工具
-│       └── StorageBlindIndexUtil.java         # 存储盲索引辅助
-├── advice/                                    # 4. HTTP 报文对称加解密切面
-│   ├── ApiDecryptRequestBodyAdvice.java       # 请求入参透明解密
-│   └── ApiEncryptResponseBodyAdvice.java      # 响应出参透明加密
-└── exception/
-    └── CryptoException.java                   # 加解密核心异常 (事务阻断)
+│       ├── BlindIndexBindingUtil.java          # 实体字段绑定关系解析与缓存
+│       └── StorageBlindIndexUtil.java          # 盲索引门面（委托 BlindIndexUtil）
+├── transport/                                  # 报文加解密（算法与密钥）
+│   ├── annotation/ApiEncrypt.java, ApiDecrypt.java
+│   ├── config/ZhkjTransportCryptoAutoConfiguration.java
+│   ├── processor/ApiCryptoProcessor.java
+│   └── properties/ApiCryptoProperties.java     # zhkj.api.crypto.*
+├── shredding/                                  # 密码学粉碎（逻辑销毁）
+│   ├── DataShreddingService.java
+│   ├── DefaultDataShreddingService.java        # 进程内存实现
+│   └── DataShreddedException.java
+├── sm2/SM2Util.java, sm3/SM3Util.java, sm4/SM4Util.java
+├── bean/CryptoInfoBean.java, enums/CryptoType.java   # CryptoType: DES, AES, SM4
+├── exception/                                  # CryptoException 及报文相关异常
+└── aot/CryptoRuntimeHints.java
 ```
 
----
+自动装配（`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`）：
 
-## 🛡️ 4. 架构级合规与安全防线
+- `ZhkjStorageCryptoAutoConfiguration`：注册 `StorageCryptoEngine`、`DataShreddingService`、`Sm3BlindIndexProvider`（均 `@ConditionalOnMissingBean`），并将 `CryptoAlgorithmProvider` Bean 注册到引擎。
+- `ZhkjTransportCryptoAutoConfiguration`：注册 `ApiCryptoProcessor`（`@ConditionalOnMissingBean`）。
 
-### 4.1 存储加密引擎事务安全阻断
-- 当出现主密钥配置错误、算法提供者异常或字符集不匹配时，`StorageCryptoEngine` 坚决抛出 `CryptoException`，直接触发数据库事务回滚；
-- **绝不降级明文存储**：绝不在加密失败时将用户的手机号或身份证直接以明文写入数据库，坚决守牢数据防脱库底线。
-
-### 4.2 盲索引强一致性散列与防哈希漂移
-- 盲索引哈希通过 `BlindIndexUtil.generateIndex(plainText)` 计算，底层动态嗅探运行环境，优先采用国密 `HmacSM3`（无 BC 依赖环境平滑降级为 `HmacSHA256`）；
-- 散列计算遭遇异常坚决阻断写入，绝不使用随机或缺省值回退，杜绝不同节点生成不一致散列导致的历史数据失效；
-- **查询语法约束**：盲索引列仅支持确定性精确等值匹配（`EQ` 或 `IN`），**严禁使用 `LIKE '%...%'` 进行模糊检索**。
+`EnvironmentPostProcessor` 通过 `META-INF/spring/org.springframework.boot.EnvironmentPostProcessor.imports` 与 `META-INF/spring.factories` 注册。
 
 ---
 
-## ⚙️ 5. 核心配置清单 (`application.yml`)
+## 🛡️ 4. 安全行为与约束
+
+### 4.1 配置态
+- 主密钥不内置。解析顺序：系统属性 `zhkj.crypto.property.password` → 环境变量 `ZHKJ_CRYPTO_PASSWORD` → 配置项 `zhkj.crypto.property.password`。
+- 三个来源读取到的主密钥若可被 Base64 解码，则使用解码结果（`EncryptablePropertyEnvironmentPostProcessor.tryDecodeBase64`）。
+- 未配置主密钥时，处理器输出 ERROR 日志并**不包装任何属性源**，`ENC(...)` 原样保留，启动不失败。
+- 解密密钥为主密钥 SHA-256 摘要的前 32 个字符（AES-256）。解密失败抛出 `IllegalStateException`。
+
+### 4.2 存储态
+- `StorageCryptoEngine` 默认 `zhkj.storage.crypto.enabled=false`，此时写入明文、读取原样返回。启用后加密失败抛出 `CryptoException`，由调用方事务回滚，引擎不回退为明文写入。
+- 写入格式为 `<version>:<算法输出>`（默认 `v1:`）；算法为 SM4 时前缀为 `sm4:<version>:`。AES 算法输出为 `cbc$` 开头的动态 IV 密文（`AesCryptoAlgorithmProvider`）。
+- 读取时同时识别 `sm4:` 前缀、当前版本前缀及历史 `v1:` 前缀；无前缀数据原样返回。
+- 密钥来源：`zhkj.storage.crypto.key` → 回退 `zhkj.crypto.master-key` → 均未配置则抛出 `CryptoException`。长度为 32 直接使用，否则取 SHA-256 前 32 字符。
+- 密码学粉碎：读取时若 `FrameworkContext` 中的 `dimensionId` 或 `tenantId` 已被 `DataShreddingService` 标记，抛出 `DataShreddedException`（仅 `decrypt` 路径检查）。默认实现为进程内存集合，多实例部署需自行提供 Bean。
+
+**已知限制（代码现状）**: 当 `algorithm=SM4` 且 SM4 不可用时，`StorageCryptoEngine.encrypt` 以 AES 算法加密，但仍使用 `sm4:<version>:` 前缀写入；读取时 `decryptPayload` 因 SM4 不可用直接返回去除前缀后的密文载荷（不解密）。详见 `StorageCryptoEngine.java` 第 266–281 行与 314–320 行。
+
+### 4.3 盲索引
+- 计算入口：`io.github.ybb88.framework.util.crypto.BlindIndexUtil.generateIndex(String)`（读取 `zhkj.storage.crypto.blind-index-salt`）与 `generateIndex(String, String salt)`。
+- 实现链（`BlindIndexUtil.generateIndex(String, String)`）：优先使用 `sm3Provider`（本模块的 `Sm3BlindIndexProvider`，HMAC-SM3 结果取前 32 个十六进制字符）；其计算失败时回退到 `PROVIDERS` 列表首个提供者；仍失败则使用 `HmacSM3`（JCE 或 BouncyCastle 可用时）否则 `HmacSHA256`，结果取前 32 个十六进制字符。
+- 盐值未配置时抛出 `IllegalStateException`，不使用内置默认盐。
+- 仅支持确定性等值匹配（`EQ` / `IN`），不得用于 `LIKE`。
+
+### 4.4 盲索引字段的自动推导（`BlindIndexBindingUtil`）
+按以下顺序建立 来源字段 → 盲索引字段 映射：
+
+1. `@BlindIndex(source = "x")` 标注在目标字段上：来源为 `x`（须存在）。`source` 为空且目标字段名以 `Hash` 结尾时，依次尝试 `基名` 与 `基名Cipher`。
+2. `@EncryptField(blindIndexField = "h")` 标注在来源字段上：目标为 `h`（须存在）。
+3. 未映射的加密字段（判定规则见下段）：若存在 `<字段名>Hash` 则映射；字段名以 `Cipher` 结尾时尝试 `<基名>Hash`。
+
+加密字段判定（`BlindIndexBindingUtil`）：标注 `@EncryptField`；或 `@TableField(typeHandler = …)` 的处理器为 `EncryptTypeHandler`（或其子类，位于 `starter-mybatis`）；或 JPA `@Convert(converter = …)` 的转换器为 `CryptoAttributeConverter`（`starter-jpa`）。普通 `@TableField` 字段不被视为加密字段；`exist` 属性不参与判定。
+
+---
+
+## ⚙️ 5. 配置项
+
+### 5.1 配置态解密 `zhkj.crypto.property.*`
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `enabled` | boolean | `true` | `false` 时不包装属性源 |
+| `password` | String | 无 | 主密钥；推荐通过环境变量 `ZHKJ_CRYPTO_PASSWORD` 注入 |
+| `prefix` | String | `ENC(` | 密文前缀 |
+| `suffix` | String | `)` | 密文后缀 |
+| `cache-enabled` | boolean | `true` | 解密结果内存缓存 |
+| `algorithm` | String | `AES` | 已绑定，当前实现不读取 |
+
+### 5.2 存储态加密 `zhkj.storage.crypto.*`
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `enabled` | boolean | `false` | 全局存储加密开关 |
+| `write-enabled` | boolean | `true` | `false` 时新写入为明文，历史密文仍可读取 |
+| `algorithm` | String | `AES` | `AES` 或 `SM4`（大小写不敏感） |
+| `key` | String | 无 | 存储密钥；未配置回退 `zhkj.crypto.master-key` |
+| `version` | String | `v1` | 密文版本前缀 |
+| `blind-index-salt` | String | 无 | 盲索引盐值，必须配置 |
+
+### 5.3 报文加解密 `zhkj.api.crypto.*`
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `enabled` | Boolean | `true` | 是否开启 |
+| `param-name` | String | `data` | URL 参数密文名 |
+| `aes-key` | String | 无 | AES 全局密钥，须 32 字节（AES-256） |
+| `des-key` | String | 无 | DES 全局密钥 |
+| `sm4-key` | String | 无 | SM4 全局密钥；字节长度不为 16 时经 SM3 派生前 16 字节（`SM4Util.deriveKey16`） |
+
+注解 `@ApiEncrypt` / `@ApiDecrypt`：`value` 为 `CryptoType`（默认 `AES`），`secretKey` 为空时使用全局配置；全局配置也缺失时抛出 `KeyNotConfiguredException`。注解可标注在类或方法上。
+
+### 5.4 示例（仅占位，密钥须由环境注入）
 
 ```yaml
+spring:
+  datasource:
+    password: "ENC(<密文>)"
+
 zhkj:
   crypto:
-    enabled: true
-    # 1. 配置文件 ENC(...) 敏感属性解密配置
     property:
+      password: "${ZHKJ_CRYPTO_PASSWORD}"
+  storage:
+    crypto:
       enabled: true
-      password: "MasterKey@2026"               # 生产环境推荐通过环境变量注入
-    # 2. HTTP 报文传输层加密配置 (可选)
-    crypto-type: AES
-    aes-key: "1234567890123456"                # 16 字节 AES 密钥
+      algorithm: AES
+      key: "${ZHKJ_STORAGE_CRYPTO_KEY}"
+      blind-index-salt: "${ZHKJ_STORAGE_CRYPTO_BLIND_INDEX_SALT}"
+  api:
+    crypto:
+      aes-key: "${ZHKJ_API_AES_KEY}"
 ```
 
-### 命令行密文生成 CLI 工具
-在打包或部署前，可使用内置的 CLI 工具生成 `ENC(...)` 密文：
+`zhkj.crypto.master-key` 不在 `ZhkjStorageCryptoProperties` 中绑定，仅由 `StorageCryptoEngine.resolveKey` 通过 `SpringUtil.getProperty` 读取，作为 `zhkj.storage.crypto.key` 的回退。
+
+### 5.5 命令行生成密文
 
 ```bash
-java -cp zhkj-framework-starter-crypto.jar io.github.ybb88.framework.crypto.property.ZhkjCryptoCli -e "my_db_password" -p "MasterKey@2026"
-# 输出: ENC(XyKx5jN5684AxytPGmOTAV7+XSDh/S83BwCb8aCdyGU=)
+java -cp zhkj-framework-starter-crypto.jar io.github.ybb88.framework.crypto.property.ZhkjCryptoCli -e "<明文>" -p "<主密钥>"
+java -cp zhkj-framework-starter-crypto.jar io.github.ybb88.framework.crypto.property.ZhkjCryptoCli -d "ENC(<密文>)" -p "<主密钥>"
 ```
+
+`ZhkjCryptoCli` 直接使用 `-p` 原值派生密钥，不执行运行期的 Base64 解码。若主密钥本身是合法 Base64 字符串，运行期与 CLI 的派生结果不一致（见第 4.1 节）。
 
 ---
 
 ## 💡 6. 典型使用范式
 
-### 6.1 配置文件中写入密文
-```yaml
-spring:
-  datasource:
-    url: jdbc:mysql://127.0.0.1:3306/db_demo?useUnicode=true&characterEncoding=utf-8
-    username: root
-    password: "ENC(XyKx5jN5684AxytPGmOTAV7+XSDh/S83BwCb8aCdyGU=)"
-```
-应用启动时，框架通过 `EnvironmentPostProcessor` 自动将明文注入 Spring 环境变量中，外部日志与监控不会暴露真实密码。
+### 6.1 实体加密字段与盲索引
 
-### 6.2 实体类持久层国密加密与盲索引声明
 ```java
 package io.github.ybb88.demo.entity;
 
@@ -140,8 +195,8 @@ import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
 import io.github.ybb88.framework.crypto.storage.annotation.BlindIndex;
 import io.github.ybb88.framework.crypto.storage.annotation.EncryptField;
-import io.github.ybb88.framework.desensitize.annotation.Desensitize;
 import io.github.ybb88.framework.desensitize.DesensitizeType;
+import io.github.ybb88.framework.desensitize.annotation.Desensitize;
 import io.github.ybb88.framework.mybatis.base.MybatisTenantEntity;
 import io.github.ybb88.framework.mybatis.crypto.handler.EncryptTypeHandler;
 import lombok.Data;
@@ -154,33 +209,29 @@ public class CustomerEntity extends MybatisTenantEntity {
 
     private String customerName;
 
-    /**
-     * 身份证号码：
-     * 1. 存储态: 国密 SM4 加密落盘
-     * 2. 展示态: Jackson 自动脱敏打码 (110101********2345)
-     * 3. 盲索引: 自动映射至 idCardHash
-     */
+    /** 存储加密（EncryptTypeHandler）；盲索引自动写入 idCardHash */
     @Desensitize(rule = DesensitizeType.ID_CARD)
     @EncryptField(blindIndexField = "idCardHash")
     @TableField(typeHandler = EncryptTypeHandler.class)
     private String idCard;
 
-    /**
-     * 身份证盲索引辅助列 (HMAC-SM3 确定性哈希)
-     */
+    /** 盲索引辅助列（HMAC-SM3） */
     @BlindIndex(source = "idCard")
     private String idCardHash;
 }
 ```
 
-### 6.3 密文等值精确检索范式
+`EncryptTypeHandler` 位于 `starter-mybatis`（`io.github.ybb88.framework.mybatis.crypto.handler`）。`@Desensitize` 与 `DesensitizeType` 位于 `zhkj-framework-core`（`io.github.ybb88.framework.desensitize`），本模块不提供。
+
+### 6.2 等值检索
+
 ```java
 package io.github.ybb88.demo.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
-import io.github.ybb88.framework.util.crypto.BlindIndexUtil;
 import io.github.ybb88.demo.entity.CustomerEntity;
 import io.github.ybb88.demo.mapper.CustomerMapper;
+import io.github.ybb88.framework.util.crypto.BlindIndexUtil;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -193,13 +244,37 @@ public class CustomerService {
     private final CustomerMapper customerMapper;
 
     public List<CustomerEntity> findByIdCard(String plainIdCard) {
-        // 计算输入的明文身份证哈希
         String hash = BlindIndexUtil.generateIndex(plainIdCard);
-        
-        // 基于盲索引辅助列进行等值检索
         return customerMapper.selectList(
             Wrappers.<CustomerEntity>lambdaQuery().eq(CustomerEntity::getIdCardHash, hash)
         );
     }
 }
 ```
+
+调用前必须已配置 `zhkj.storage.crypto.blind-index-salt`。
+
+### 6.3 报文加解密注解
+
+```java
+@RestController
+@RequestMapping("/api/v1/trade")
+public class TradeController {
+
+    @PostMapping("/pay")
+    @ApiDecrypt(CryptoType.AES)
+    @ApiEncrypt(CryptoType.AES)
+    public R<OrderVo> createOrder(@RequestBody OrderCreateDto dto) {
+        return R.data(tradeService.processPayment(dto));
+    }
+}
+```
+
+请求解密与响应加密由 `starter-web`（`io.github.ybb88.framework.web.crypto.core`）中的 `ApiDecryptRequestBodyAdvice` 与 `ApiEncryptResponseBodyAdvice` 完成。
+
+---
+
+## 📎 7. 相关文档
+
+- `zhkj-framework/zhkj-framework-starter-mybatis`：`EncryptTypeHandler`、`ZhkjMetaObjectHandler` 盲索引填充
+- `zhkj-framework/zhkj-framework-starter-web`：报文加解密切面

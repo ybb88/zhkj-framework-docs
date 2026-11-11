@@ -1,19 +1,25 @@
 # 注册与配置中心：zhkj-framework-starter-nacos
 
-> **模块定位**: 微服务服务注册与配置中心 Starter，基于 Alibaba Nacos 深度整合，提供服务自动注册、动态心跳探测、分布式配置集中纳管与热更新刷新机制。  
-> **适用基准**: OpenJDK 21 (LTS), Spring Boot 4.1.1, Spring Cloud Alibaba 2025  
+> **模块定位**: 对 Spring Cloud Alibaba Nacos 的薄封装。本模块在容器初始化时（`@PostConstruct`）向 `NacosDiscoveryProperties` 的 metadata 补充框架版本、服务版本、运行 Profile 与启动时间；注册中心与配置中心的连接参数由 Spring Cloud Alibaba 标准配置项提供。  
+> **适用基准**: OpenJDK 21 (LTS), Spring Boot 4.1.1, Spring Cloud 2025.1.2, Spring Cloud Alibaba 2025.1.0.0  
 > **模块坐标**: `io.github.ybb88:zhkj-framework-starter-nacos`
 
 ---
 
-## 📋 1. 架构定位与核心设计
+## 📋 1. 架构定位与职责
 
-在分布式微服务架构中，服务实例的动态寻址与集中式配置管理是微服务治理的基石：
+1. **元数据补充**: 当类路径存在 `NacosDiscoveryProperties` 时，`ZhkjNacosAutoConfiguration` 在初始化阶段向 `spring.cloud.nacos.discovery.metadata` 写入以下键（仅在键不存在时写入）:
 
-1. **服务自动注册与健康嗅探**：应用启动后自动将服务名、IP、监听端口及集群元数据上报至 Nacos 注册中心，并保持心跳检测；
-2. **配置集中管理与动态热刷新**：支持基于 DataId 与 Group 进行多环境配置隔离（`dev`、`test`、`prod`），配合 Spring Cloud 机制实现配置热刷新（`@RefreshScope`），修改配置无需重启服务；
-3. **彻底解耦历史加密逻辑**：完全剔除早期分散在 Nacos 内部的 Jasypt 与 RSA 加密逻辑，所有配置解密统一由 `starter-crypto` 在 `EnvironmentPostProcessor` 阶段收敛承载，Nacos 模块职责纯粹单一；
-4. **元数据动态感知**：自动将当前工程构件版本及环境变量写入微服务元数据（Metadata），便于网关执行基于版本的灰度金丝雀发布。
+   | 元数据键 | 值来源 |
+   | :--- | :--- |
+   | `framework.version` | 本模块 Jar 的 `Implementation-Version`，否则 `Specification-Version`，均缺失时为 `UNKNOWN` |
+   | `service.version` | `info.version`（非空时），否则为 `framework.version` |
+   | `service.profile` | `spring.profiles.active`，缺省 `default` |
+   | `startup.time` | 启动时间，格式 `yyyy-MM-dd HH:mm:ss` |
+
+2. **配置中心与注册中心**: 本模块不定义连接参数，也不引入新的配置键。`spring-cloud-starter-alibaba-nacos-discovery` 与 `spring-cloud-starter-alibaba-nacos-config` 作为依赖由 `pom.xml` 引入。
+3. **无 Bean 注册**: `ZhkjNacosAutoConfiguration` 不向容器注册业务 Bean，仅执行元数据补充。
+4. **加密解耦**: 敏感配置的 `ENC(...)` 解密由 `zhkj-framework-starter-crypto` 的 `EncryptablePropertyEnvironmentPostProcessor` 统一负责（包装环境中已存在的可包装属性源），本模块不处理解密。框架现行方案不含 Jasypt 或 RSA。Nacos 配置须在该后置处理器执行前已装入环境 `[待确认]`（装入时序由 Spring Cloud Alibaba 的配置导入机制决定，本仓库未验证）。
 
 ---
 
@@ -26,22 +32,24 @@
 </dependency>
 ```
 
+依赖（来自 `pom.xml`）: `zhkj-framework-core`、`spring-boot-starter`、`spring-cloud-starter-alibaba-nacos-discovery`、`spring-cloud-starter-alibaba-nacos-config`。
+
 ---
 
-## 🧱 3. 核心包结构与组件
+## 🧱 3. 包结构
 
 ```
 io.github.ybb88.framework.nacos
-├── config/
-│   ├── ZhkjNacosAutoConfiguration.java # Nacos 增强自动装配类
-│   └── NacosProperties.java           # Nacos 参数配置属性
-└── constant/
-    └── NacosConstant.java             # Nacos 默认配置分组与上下文常量
+└── config/
+    └── ZhkjNacosAutoConfiguration.java
+resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
 ```
 
 ---
 
-## ⚙️ 4. 核心配置清单 (`bootstrap.yml` / `application.yml`)
+## ⚙️ 4. 标准配置示例
+
+以下键属于 Spring Cloud Alibaba，由 `spring-cloud-starter-alibaba-nacos-*` 解析:
 
 ```yaml
 spring:
@@ -49,52 +57,56 @@ spring:
     name: demo-service
   cloud:
     nacos:
-      # 1. 服务发现与注册中心配置
       discovery:
         server-addr: 127.0.0.1:8848
-        namespace: "public"
-        group: "DEFAULT_GROUP"
+        group: DEFAULT_GROUP
         metadata:
-          version: "2026.4.1.0"
-      # 2. 分布式配置中心配置
+          team: order
       config:
         server-addr: 127.0.0.1:8848
-        namespace: "public"
-        group: "DEFAULT_GROUP"
-        file-extension: "yaml"
+        group: DEFAULT_GROUP
+        file-extension: yaml
         refresh-enabled: true
-        # 共享与扩展配置
         shared-configs:
-          - data-id: "zhkj-common.yaml"
-            group: "DEFAULT_GROUP"
+          - data-id: zhkj-common.yaml
+            group: DEFAULT_GROUP
             refresh: true
 ```
 
+`info.version` 由启动器写入（值为 `AppConstant.APPLICATION_VERSION`，当前为 `3.0.0`，见 [launcher](./launcher.md)），因此通过 `ZhkjApplication` 启动的服务其 `service.version` 元数据为该值。
+
 ---
 
-## 💡 5. 典型使用范式
+## 💡 5. 使用说明
 
-### 5.1 动态配置热刷新 (`@RefreshScope`)
-在 Spring Bean 上标注 `@RefreshScope`，当在 Nacos 控制台修改配置并发布时，Spring 会自动更新 Bean 中的属性值：
+### 5.1 动态配置热刷新
+在 Bean 上标注 `@RefreshScope` 后，Nacos 中的配置变更会刷新该 Bean 的属性（Spring Cloud 标准机制）。
 
 ```java
-package io.github.ybb88.demo.config;
-
-import lombok.Data;
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.cloud.context.config.annotation.RefreshScope;
-import org.springframework.stereotype.Component;
-
 @Data
 @Component
 @RefreshScope
 @ConfigurationProperties(prefix = "biz.feature")
 public class FeatureSwitchProperties {
 
-    /**
-     * Nacos 控制台动态修改后，无需重启微服务，实时生效
-     */
     private boolean orderApprovalEnabled = false;
     private int maxRetryAttempts = 3;
 }
 ```
+
+### 5.2 读取实例元数据
+```java
+@Autowired
+private DiscoveryClient discoveryClient;
+
+public String serviceVersion(String serviceName) {
+    return discoveryClient.getInstances(serviceName).get(0).getMetadata().get("service.version");
+}
+```
+
+---
+
+## 🔗 6. 相关文档
+
+- 启动器: [launcher](./launcher.md)
+- 加密配置: `zhkj-framework-starter-crypto`（`ENC(...)` 解密）
