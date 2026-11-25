@@ -38,7 +38,7 @@ io.github.ybb88.framework.tenant
 │   ├── TenantContextHolder.java                 # 门面（委托 TenantContext）
 │   └── TenantContextSnapshotProvider.java       # FrameworkContext 快照（order 100）
 ├── core/
-│   ├── TenantConstant.java                      # DEFAULT_TENANT_ID = "0"，ADMIN_TENANT_ID = "00000000"
+│   ├── TenantConstant.java                      # DEFAULT_TENANT_ID = "0"，ADMIN_TENANT_ID = "10000001"
 │   ├── TenantRuleProvider.java                  # 行级隔离规则 SPI
 │   ├── DefaultTenantRuleProvider.java           # 默认实现（读取 zhkj.tenant.field-isolation.*）
 │   ├── TenantId.java, ZhkjTenantId.java         # 租户 ID 生成 SPI（默认返回 "0"）
@@ -74,7 +74,7 @@ zhkj:
       column: tenant_id                  # 默认 tenant_id
       tables: []                         # 非空时仅这些表参与隔离
       ignore-tables: [sys_tenant, sys_dict]
-      default-tenant-id: "00000000"      # 绑定值，DefaultTenantRuleProvider 未读取
+      default-tenant-id: "10000001"      # 绑定值，DefaultTenantRuleProvider 未读取
     tenants:                             # 静态租户元数据（可选）
       - tenant-id: "1001"
         tenant-name: "示例机构"
@@ -111,11 +111,11 @@ MyBatis 配置优先级（详见 [starter-mybatis](starter-mybatis.md)）：
 - 注册表中存在该租户：使用注册元数据的副本；
 - 不存在：构造仅属于本次请求的 `TenantInfo`（`SHARED_DATABASE`），不写入注册表；
 - `X-Dimension-Id` 非空时写入 `dimensionId`；
-- 仅当当前请求的 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED` 属性为 `Boolean.TRUE`，且同时存在 `X-Delegated-Tenant-Id` 与 `X-Grant-Ticket` 时，接受委托头；`X-Internal-RPC` 不作为权限依据。
+- 不接受 `X-Delegated-Tenant-Id` 或 `X-Grant-Ticket`；即使 `TENANT_DELEGATION_AUTHORIZED` 请求属性为 `Boolean.TRUE`，也不授予跨租户请求权限。
 
 > 未知请求头租户会成为当前请求的租户上下文，**租户解析本身不做授权校验**。公网入口须剥离客户端自带的租户与内部委托头，并由业务完成授权。网关在认证、匿名白名单及 `enabled=false` 分支均剥离 `X-Internal-RPC`、`X-Delegated-Tenant-Id`、`X-Grant-Ticket`。
 
-**安全行为变更与迁移**：旧标记头不再允许委托。宿主必须先认证调用方并校验目标端点及租户委托权限，再受控设置当前 ServletRequest 的 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED` 为 `Boolean.TRUE`，并在包围下游处理的 `finally` 中删除；不得由 Header、ThreadLocal 或是否携带机器凭据推断授权。机器认证、脱敏授权与租户委托授权互不等价；基于可信 JWT 声明建立的现有上下文仍按原逻辑处理。
+**安全行为变更与迁移**：目前没有可核验的委托票据签发及端点级资源/行为校验契约，委托头和可信 JWT 中的委托声明均不能作为跨租户授权。ORM 对携带委托元数据的上下文直接拒绝；业务必须先实现受保护的具体操作及服务端审批、主体、目标租户、资源范围、时效和撤销校验，不能通过通用上下文切换开放写入。
 
 ### 5.2 子域名（`SubdomainTenantResolver`，`@Order(2)`）
 
@@ -166,8 +166,8 @@ MyBatis 配置优先级（详见 [starter-mybatis](starter-mybatis.md)）：
 
 ## 🔗 7. RPC 与跨线程
 
-- `TenantRpcHeaderProvider` 在发起远程调用时注入：`X-Tenant-Id`、`X-Tenant-ID`、`zhkj-tenant-id`（租户 ID），`X-Dimension-Id`，`X-Delegated-Tenant-Id`，`X-Grant-Ticket`。值依次取自 `TenantContext`、`FrameworkContext`，租户 ID 最后回退到安全上下文快照。
-- 接收端仅在服务端 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED` 请求属性为 `Boolean.TRUE` 时接受委托头（见第 5.1 节）；传输头与异步上下文快照均不承载该授权。普通 RPC 与公共展示端点默认脱敏，明文权限另由 `DESENSITIZE_AUTHORIZED` 请求属性控制。
+- `TenantRpcHeaderProvider` 只透传 `X-Tenant-Id`、`X-Tenant-ID`、`zhkj-tenant-id`（主体租户 ID）及 `X-Dimension-Id`；不透传委托目标与票据。租户 ID 依次取自 `TenantContext`、`FrameworkContext`、安全上下文快照。
+- 接收端忽略委托头；传输头与异步上下文快照均不承载跨租户授权。普通 RPC 与公共展示端点默认脱敏，明文权限另由 `DESENSITIZE_AUTHORIZED` 请求属性控制。
 - 异步任务应在提交线程捕获快照：
 
 ```java
@@ -183,7 +183,7 @@ executor.execute(() -> FrameworkContext.runWith(snapshot, this::doWork));
 
 - `getTenantColumn()`：`zhkj.tenant.field-isolation.column`；
 - `ignoreTable(name)`：无租户上下文时返回 `true`；否则命中 `ignore-tables` 或不在非空 `tables` 白名单中时返回 `true`；
-- `resolveTenantId()`：优先委托租户（需同时存在 `grantTicket`），其次 `TenantContext`，再次安全上下文快照，最后 `TenantConstant.DEFAULT_TENANT_ID`（`"0"`）。
+- `resolveTenantId()`：存在未核验委托目标或票据时拒绝；否则依次读取主体 `TenantContext`、安全上下文快照，最后返回 `TenantConstant.DEFAULT_TENANT_ID`（`"0"`）。
 
 表名比较忽略大小写，并去除反引号与双引号。
 

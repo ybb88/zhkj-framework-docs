@@ -32,10 +32,10 @@
 
 ### 1.2 行级隔离与双模探测自愈机制
 在无 Servlet 请求上下文的场景（如批处理、Kafka 消费、`@Async` 线程池）中，若直接放行会导致越权。`MybatisTenantHandler` 的处理逻辑：
-1. 注册了 `TenantRuleProvider` 时（常规装配），`MybatisTenantHandler.getTenantId()` 委托 `ruleProvider.resolveTenantId()`（`MybatisTenantHandler.java` 第 49–55 行）。`DefaultTenantRuleProvider.resolveTenantId()` 依次读取受控委托租户、`TenantContext`，再降级读取 `FrameworkContext` 快照中的安全身份租户并回填 `TenantContext`，最后返回默认租户 `0`（`DefaultTenantRuleProvider.java` 第 112–131 行，`TenantConstant.DEFAULT_TENANT_ID`）。
-2. 未注册 `TenantRuleProvider` 时（裁剪自动配置的内建路径），按受控委托租户 → `TenantContext` → `FrameworkContext` 快照（`resolveTenantIdFromSecurityContext()`，第 185 行）顺序取值（第 58–66 行）；快照租户回填由 `autoSyncTenantContext()`（第 193 行）完成。
-3. 配置项 `zhkj.tenant.mybatis.default-tenant-id`（默认 `00000000`）仅在处理器仍取不到租户 ID 时兜底（第 53、70 行），不覆盖提供者已返回的 ID。
-4. `ignoreTable()`：注册 `TenantRuleProvider` 时委托其裁决，`DefaultTenantRuleProvider` 在无租户上下文时返回 `true`（`DefaultTenantRuleProvider.java` 第 92–94 行）；未注册时内建路径在无租户上下文时同样返回 `true`（`MybatisTenantHandler.java` 第 146–148 行）。返回 `true` 的 SQL 不附加租户条件。
+1. 注册了 `TenantRuleProvider` 时（常规装配），`MybatisTenantHandler.getTenantId()` 先拒绝携带未核验委托目标或票据的上下文，再调用 `ruleProvider.resolveTenantId()`；默认 provider 只从主体 `TenantContext`、安全上下文快照解析租户，缺失时返回默认租户 `0`。
+2. 未注册 `TenantRuleProvider` 时（裁剪自动配置的内建路径），同样先拒绝委托元数据，再按主体 `TenantContext` → `FrameworkContext` 安全上下文快照顺序解析；绝不因 `grantTicket` 放宽任意 SQL。
+3. 配置项 `zhkj.tenant.mybatis.default-tenant-id`（默认 `10000001`）仅在处理器仍取不到租户 ID 时兜底（第 54、74 行），不覆盖提供者已返回的 ID。
+4. `ignoreTable()`：携带委托元数据时先拒绝；无租户上下文时，注册默认 `TenantRuleProvider` 或采用内建路径均会返回 `true`，不附加租户条件。业务入口必须先完成主体身份认证，不得把无上下文查询当成跨租户授权。
 
 ### 1.3 拦截器链拓扑编排
 拦截器链的实际装配见 `docs/architecture/overview.md` 第 3.4 节：
@@ -48,7 +48,7 @@ $$\mathbf{TenantLineInnerInterceptor} \longrightarrow \mathbf{MybatisDataScopeIn
 | 配置前缀 | 绑定类 | 常用项 |
 | :--- | :--- | :--- |
 | `zhkj.tenant` | `TenantProperties` | `enabled`（默认 `true`）、`default-isolation-mode`、`resolvers`（默认 `header`、`subdomain`）、`tenants`、`field-isolation` |
-| `zhkj.tenant.mybatis` | `MybatisTenantProperties` | `column`（默认 `tenant_id`）、`tables`、`ignore-tables`、`default-tenant-id`（默认 `00000000`） |
+| `zhkj.tenant.mybatis` | `MybatisTenantProperties` | `column`（默认 `tenant_id`）、`tables`、`ignore-tables`、`default-tenant-id`（默认 `10000001`） |
 
 ```yaml
 zhkj:
@@ -118,7 +118,7 @@ public class CustomDeptAncestorProvider implements DeptAncestorProvider {
 | `dept-table` | `sys_org` | 部门表名（存量默认值，见下方说明） |
 | `dept-id-column` | `id` | 部门 ID 列 |
 | `dept-ancestors-column` | `ancestors` | 祖先路径列 |
-| `dept-logic-delete-column` / `dept-logic-delete-value` | `is_deleted` / `0` | 部门表逻辑删除列与未删除值 |
+| `dept-logic-delete-column` / `dept-logic-delete-value` | `deleted_id` / `0` | 部门表逻辑删除列与未删除值 |
 | `scope-data-table` | `zhkj_scope_data` | 数据范围表（存量默认值） |
 | `role-scope-table` | `zhkj_role_scope` | 角色数据范围表（存量默认值） |
 | `mapper-key` | `page`, `Page`, `list`, `List`, `update`, `Update`, `delete`, `Delete` | 参与改写的 Mapper 方法名匹配关键字 |

@@ -10,7 +10,7 @@
 
 1. **注解声明**：`@DataAuth` 标注在 Mapper 方法或接口上，声明资源编码、过滤列与默认范围。
 2. **规则来源**：运行期优先读取数据库中的数据权限配置（按 Mapper 方法与角色、或按资源编码）；未命中时使用注解中的值。
-3. **SQL 改写**：`SqlDataScopeAstEngine.rewriteSql` 对 `SELECT` / `UPDATE` / `DELETE` 解析 AST，将条件以 `AND (condition)` 合并进 `WHERE`。
+3. **SQL 改写**：`SqlDataScopeAstEngine.rewriteSql` 对 `SELECT` / `UPDATE` / `DELETE` 解析 AST，将条件以 `AND (condition)` 合并进 `WHERE`。原 `WHERE` 为顶层 `OR` 时先整体加括号。无法注入条件时（解析失败、集合运算、不支持的语句类型）抛出 `DataScopeException`，拒绝执行，不回落为原 SQL。
 4. **组织拓扑 SPI**：`DeptAncestorProvider` 提供子孙部门 ID；未提供时通过 `sys_org` 表的 `ancestors` 列查询。
 5. **管理员放行**：角色为 `administrator` 或 `super_admin` 时不做改写（见第 6 节）。
 
@@ -66,7 +66,7 @@ zhkj:
     dept-table: sys_org
     dept-id-column: id
     dept-ancestors-column: ancestors
-    dept-logic-delete-column: is_deleted
+    dept-logic-delete-column: deleted_id
     dept-logic-delete-value: "0"
     scope-data-table: zhkj_scope_data
     role-scope-table: zhkj_role_scope
@@ -80,7 +80,7 @@ zhkj:
 | `dept-table` | `sys_org` | 部门表名 |
 | `dept-id-column` | `id` | 部门主键列 |
 | `dept-ancestors-column` | `ancestors` | 部门祖先路径列 |
-| `dept-logic-delete-column` | `is_deleted` | 部门逻辑删除列 |
+| `dept-logic-delete-column` | `deleted_id` | 部门逻辑删除列 |
 | `dept-logic-delete-value` | `"0"` | 部门未删除值；所有表名与列名须匹配 `^[a-zA-Z0-9_]+$`（`DataScopeSqlUtil`） |
 | `scope-data-table` | `zhkj_scope_data` | 数据权限配置表 |
 | `role-scope-table` | `zhkj_role_scope` | 角色与数据权限关联表 |
@@ -131,7 +131,7 @@ zhkj:
 部门子孙查询（`ZhkjScopeModelHandler.getDeptAncestors`）：
 
 - 若存在 `DeptAncestorProvider` Bean（`ObjectProvider.getIfAvailable()`）且其返回值非 `null`（空列表同样直接采用），直接使用其结果；调用异常时记录 WARN 并降级为动态 SQL。
-- 否则执行 `select <id> from <dept-table> where <ancestors> like concat(concat('%', ?),'%') and <logic-col> = <value>`（参数为 `deptId`，由 `DataScopeSqlUtil.dataByDept` 生成），结果写入 `SYS_CACHE`；结果为空时下次仍会重新查询。
+- 否则执行 `select <id> from <dept-table> where concat(',', <ancestors>, ',') like concat('%,', ?, ',%') and <logic-col> = <value>`（参数为 `deptId`，由 `DataScopeSqlUtil.dataByDept` 生成），按分隔符做整段匹配，部门 `1` 不会命中祖先路径中的 `10`、`11`；结果写入 `SYS_CACHE`；结果为空时下次仍会重新查询。
 
 ---
 
@@ -187,18 +187,19 @@ DataScopeModel model = DataScopeContext.getDataScope();   // 改写期间有效
 
 ## 🛡️ 8. 行为约束与注意事项
 
-- 解析失败时，`SqlDataScopeAstEngine.rewriteSql` 记录 WARN 日志并返回原 SQL（不附加条件）。依赖数据权限的语句须保证可被 JSqlParser 解析。
+- 无法注入权限条件时，`SqlDataScopeAstEngine.rewriteSql` 抛出 `DataScopeException`，调用方拒绝执行该语句。依赖数据权限的语句须保证可被 JSqlParser 解析，且不得为 `UNION` / `INTERSECT` / `EXCEPT` 等集合运算。
 - `DataScopeSqlUtil` 对表名与列名做字符白名单校验；`DataAuth.column` 与 `scope_column` 不做校验，应由开发者或数据库配置保证。
 - `CUSTOM` 类型的 `scopeValue` 按原文拼接进 SQL，仅可由可信配置写入。
 - `MybatisDataScopeInterceptor` 的字段与构造参数均为具体类 `MybatisDataScopeHandler`（`MybatisDataScopeInterceptor.java` 第 59、63 行），`MybatisDataScopeAutoConfiguration` 亦只注册该类型 Bean；因此 `DataScopeHandler` 接口的其它实现不会被调用。当前可扩展点为 `DeptAncestorProvider`。
-- 部门子孙默认查询使用 `LIKE '%<id>%'` 匹配 `ancestors` 列，未对分隔符做边界处理（见第 9 节）。
+- 部门子孙默认查询按分隔符做整段匹配，不再对 `ancestors` 做子串匹配（见第 9 节）。
 
 ---
 
 ## 🚫 9. 已知问题（代码现状）
 
-- `ZhkjScopeModelHandler.getDeptAncestors` 默认 SQL（`DataScopeSqlUtil.dataByDept`，`DataScopeSqlUtil.java` 第 50 行）使用子串匹配。部门 ID `1` 会命中 `ancestors` 中包含 `10`、`11` 的记录。
 - 数据权限对角色为 `administrator` 或 `super_admin` 的用户整体放行（`RoleUtil.isPrivileged`）。
+- 集合运算语句（`UNION` / `INTERSECT` / `EXCEPT`）暂不支持权限条件注入，遇到时抛出 `DataScopeException`；历史版本会静默放行原 SQL，已于 2026-11-11 修复。
+- 原 `WHERE` 为顶层 `OR` 时，历史版本未加括号导致权限条件被 `OR` 分支绕过，已于 2026-11-11 修复。
 
 ---
 

@@ -136,7 +136,7 @@ executor.execute(() -> {
 `ILogicDeleteEntity<T>`、`ITenantEntity`、`IVersionEntity<T>` 均直接继承 `Serializable`，与实体主键类型无关，可按需组合实现。
 
 ### 5.3 Jackson 与实体注解
-实体与框架通用层不引入 `com.fasterxml.jackson.*` 注解（当前框架源码中未发现该类引用）。框架使用 Jackson 3（`tools.jackson.*`）。
+实体与框架通用层不引入 `com.fasterxml.jackson.*` 注解（存量例外：`zhkj-framework-core` 的 `tenant/TenantId.java:3-4` 引用了 `com.fasterxml.jackson.annotation`，待治理）。框架使用 Jackson 3（`tools.jackson.*`）。
 
 ---
 
@@ -147,10 +147,10 @@ executor.execute(() -> {
 | 规则 | 现状 | 位置 |
 | :--- | :--- | :--- |
 | 工具类私有构造器（第 2.2 节） | `SpringUtil` 未声明私有构造器 | `zhkj-framework-core/src/main/java/io/github/ybb88/framework/util/SpringUtil.java:15` |
-| Anti-FQCN（第 1.9 条） | 行内全限定类名 2 处（已复核） | `zhkj-framework-core/.../util/crypto/BlindIndexUtil.java:75-77`（`java.security.*`）；`zhkj-framework-starter-mybatis/.../config/MybatisPlusConfiguration.java:101`（`com.baomidou.*`） |
+| Anti-FQCN（第 1.9 条） | 行内全限定类名 2 处（已复核） | `zhkj-framework-core/.../util/crypto/BlindIndexUtil.java:75-77`（`java.security.*`）；`zhkj-framework-starter-mybatis/.../config/MybatisPlusConfiguration.java:93,104`（`com.baomidou.*`） |
 | 自动配置注解（第 1.5 条） | 切面类 `RequestLogAspect` 标注了 `@AutoConfiguration`，待确认是否应改为其他注解 | `zhkj-framework-starter-web/.../logger/RequestLogAspect.java:54` |
 | 框架层不硬编码业务表名（第 1.6 条） | 数据权限默认表名 `sys_org`（:39）、`zhkj_scope_data`（:64）、`zhkj_role_scope`（:69） | `zhkj-framework-starter-datascope/.../props/DataScopeProperties.java:39,64,69` |
 | 盲索引不回退（`docs/architecture/security.md` 第 2.3.2 节） | SPI 提供者失败时回退默认算法 | `zhkj-framework-core/.../util/crypto/BlindIndexUtil.java:119,126,209` |
 | 日期格式化线程安全（第 2.3 节） | Jackson 配置中构造 `SimpleDateFormat` 实例（需确认 Jackson 是否克隆） | `zhkj-framework-starter-web/.../config/JacksonConfiguration.java:52` |
 
-已符合规约的项（抽样）: `getBytes()` 无参调用在 `zhkj-framework-*/src/main` 中未发现；`StringPool`/`CharPool` 为 `final class`；`StringUtil`、`JsonUtil` 等 `*Util` 类均为 `final` 且（除 `SpringUtil` 外）具备私有构造器；Jackson 注解未在源码中引用；框架源码未发现 `zhkj-ncap` 字样。
+已符合规约的项（抽样）: `getBytes()` 无参调用在 `zhkj-framework-*/src/main` 中未发现；`StringPool`/`CharPool` 为 `final class`；`StringUtil`、`JsonUtil` 等 `*Util` 类均为 `final` 且（除 `SpringUtil` 外）具备私有构造器；框架源码未发现 `zhkj-ncap` 字样；Jackson 注解仅见于 `zhkj-framework-core/.../tenant/TenantId.java:3-4`（存量例外，见第 5.3 节）。

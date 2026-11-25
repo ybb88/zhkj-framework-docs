@@ -280,9 +280,9 @@ public R<OrderVo> create(@RequestBody OrderDto dto) {
 3. **顺序与宿主接入**：脱敏过滤器维持 `HIGHEST_PRECEDENCE + 20`。宿主认证过滤器必须先于此顺序执行，完成调用方认证与目标内部端点授权后，仅为确需明文的请求赋权；公共展示 API 不因机器凭据正确而获得明文权限，没有明文业务需求的内部端点不应赋权。宿主认证过滤器不由本 starter 自动提供。
 4. **受控序列化**：仅当 `request.getAttribute(RpcRequestAttribute.DESENSITIZE_AUTHORIZED) == Boolean.TRUE` 时，`InternalRpcDesensitizeFilter` 才调用 `DesensitizeContext.disable()`，使当前受授权请求的 Jackson 序列化不再对 `@Desensitize` 字段打码。
 5. **异常同样清理**：未授权请求显式启用脱敏；脱敏过滤器在 `finally` 恢复进入过滤器前的开关状态以支持嵌套调用，而非无条件 `enable()`。授予权限的宿主过滤器在包围下游过滤器链的 `finally` 中调用 `request.removeAttribute(RpcRequestAttribute.DESENSITIZE_AUTHORIZED)`；外层 `FrameworkContextClearFilter` 兜底清理上下文。
-6. **委托权限独立**：机器认证与脱敏授权均不等于跨租户委托授权。接受委托头另需宿主验证委托权限后设置 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED` 请求属性为 `Boolean.TRUE`，并在 `finally` 删除。可信 JWT 声明建立的现有上下文保持原逻辑。
+6. **委托权限独立**：机器认证、脱敏授权、`TENANT_DELEGATION_AUTHORIZED` 请求标志和可信 JWT 委托声明均不提供资源/行为级跨租户授权；当前通用委托请求默认拒绝。
 
-**安全行为变更与迁移指导**：依赖旧标记头获取明文的调用不再获得明文。确需明文的调用须迁移到具有认证与目标端点授权的内部路径，由宿主在 `+20` 过滤器之前受控设置请求属性；禁止简单地把 Header 转换成授权属性，禁止对所有 RPC 或公共展示 API 统一赋权。没有独立委托授权的调用不能再凭标记头接受委托参数。
+**安全行为变更与迁移指导**：依赖旧标记头获取明文的调用不再获得明文。确需明文的调用须迁移到具有认证与目标端点授权的内部路径，由宿主在 `+20` 过滤器之前受控设置脱敏请求属性；禁止把 Header 转换成授权属性、对所有 RPC 或公共展示 API 统一赋权。跨租户访问须由具体受保护的业务操作另行验证，不能通过通用委托标志放行。
 
 网关在认证路径、匿名白名单及 `enabled=false` 分支均剥离 `X-Internal-RPC`、`X-Delegated-Tenant-Id`、`X-Grant-Ticket`。此契约不引入共享万能密钥或自制签名，也不替代敏感操作审批、审计及实际部署的入口隔离验证。
 
@@ -304,7 +304,7 @@ public R<OrderVo> create(@RequestBody OrderDto dto) { ... }
 | `recordParams` | `true` | 记录请求参数（JSON） |
 | `recordResult` | `false` | 记录返回结果 |
 
-`AuditLogAspect` 对标注方法执行环绕通知，采集 `traceId`、`FrameworkContext` 快照中的租户与操作人、客户端 IP、请求 URI、方法签名、耗时与成功或失败状态，封装为 `AuditLogEvent` 并通过 `ApplicationEventPublisher` 发布。本模块不包含事件监听与持久化实现，落库由业务侧监听器完成（待确认：各业务工程的监听实现）。
+`AuditLogAspect` 对标注方法执行环绕通知，采集 `traceId`、`FrameworkContext` 快照中的租户与操作人、客户端 IP、请求 URI、方法签名、耗时与成功或失败状态，封装为 `AuditLogEvent` 并通过 `ApplicationEventPublisher` 发布；不记录委托票据原文。本模块不包含事件监听与持久化实现，落库由业务侧监听器完成（待确认：各业务工程的监听实现）。
 
 ---
 

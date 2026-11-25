@@ -144,14 +144,14 @@ $$\mathbf{TenantLineInnerInterceptor} \longrightarrow \mathbf{MybatisDataScopeIn
 1. **统一导包**: 规约要求依赖在文件头集中 `import`，正文仅使用简单类名。
 2. **存量待治理**（初步扫描，未全量核查）:
    - `zhkj-framework-core/.../util/crypto/BlindIndexUtil.java:76`（`java.security.Provider` 行内全限定类名）
-   - `zhkj-framework-starter-mybatis/.../config/MybatisPlusConfiguration.java:101`（`com.baomidou.mybatisplus.autoconfigure.MybatisPlusProperties` 行内全限定类名）
+   - `zhkj-framework-starter-mybatis/.../config/MybatisPlusConfiguration.java:93`（`com.baomidou.mybatisplus.autoconfigure.MybatisPlusProperties` 行内全限定类名）
 
 ### 3.10 内部微服务 RPC 脱敏旁路放行机制
 1. **传输标记不是授权**: `X-Internal-RPC: true`（`HeaderConstant.X_INTERNAL_RPC`）仅标记 RPC 调用；普通 RPC 与公共展示端点默认保持 `@Desensitize` 脱敏。
 2. **服务端授权契约**: 宿主完成调用方认证与目标内部端点授权后，才可在当前 ServletRequest 设置 `RpcRequestAttribute.DESENSITIZE_AUTHORIZED` 为 `Boolean.TRUE`；不得从 Header 或 ThreadLocal 推断授权。
 3. **作用域受控放行**: `InternalRpcDesensitizeFilter` 维持 `Ordered.HIGHEST_PRECEDENCE + 20`，仅认可上述请求属性；授权请求调用 `DesensitizeContext.disable()`，未授权请求显式启用脱敏，`finally` 恢复进入过滤器前的开关状态以支持嵌套调用。授权方在 `finally` 删除请求属性，`FrameworkContextClearFilter` 兜底清理上下文。
 4. **宿主接入顺序**: 宿主认证过滤器必须先于 `HIGHEST_PRECEDENCE + 20` 执行，完成调用方认证与目标内部端点授权后，才为确需明文的请求授予脱敏属性；公共展示 API 不因机器凭据正确而获得明文权限。
-5. **独立委托与入口清理**: 接受委托头另需服务端 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED == Boolean.TRUE`，机器认证不等于跨租户授权。网关包括匿名路径与 `enabled=false` 分支均剥离 `X-Internal-RPC`、`X-Delegated-Tenant-Id`、`X-Grant-Ticket`；可信 JWT 声明建立的现有上下文不受本次变更影响。
+5. **独立委托与入口清理**: `TENANT_DELEGATION_AUTHORIZED` 标志及可信 JWT 的委托声明均不提供资源/行为级跨租户授权；当前通用委托请求默认拒绝。网关包括匿名路径与 `enabled=false` 分支均剥离 `X-Internal-RPC`、`X-Delegated-Tenant-Id`、`X-Grant-Ticket`，机器认证不等于跨租户授权。
 
 ### 3.11 模块依赖拓扑（以各模块 pom 为准）
 

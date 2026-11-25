@@ -73,7 +73,7 @@ org.springframework.data.util.TypeInformation   # 兼容垫片 (@Deprecated(forR
 | :--- | :--- | :--- | :--- |
 | `IEntity<ID extends Serializable>` | ID | `Serializable` | `ID getId()`、`void setId(ID id)` |
 | `IAuditEntity<ID extends Serializable>` | ID | `IEntity<ID>` | `Long getCreateBy()`、`void setCreateBy(Long)`、`LocalDateTime getCreateTime()`、`void setCreateTime(LocalDateTime)`、`Long getUpdateBy()`、`void setUpdateBy(Long)`、`LocalDateTime getUpdateTime()`、`void setUpdateTime(LocalDateTime)` |
-| `ITenantEntity` | — | `Serializable` | `String getTenantId()`、`void setTenantId(String)` |
+| `ITenantEntity` | — | `Serializable` | `TenantId getTenantId()`、`void setTenantId(TenantId)` |
 | `ILogicDeleteEntity<T>` | T | `Serializable` | `T getDeleted()`、`void setDeleted(T)` |
 | `IVersionEntity<T>` | T | `Serializable` | `T getVersion()`、`void setVersion(T)` |
 
@@ -85,19 +85,19 @@ org.springframework.data.util.TypeInformation   # 兼容垫片 (@Deprecated(forR
 
 ### 5.1 `PojoBaseEntity`
 
-`public abstract class PojoBaseEntity extends BaseModel implements IAuditEntity<Long>, ILogicDeleteEntity<Integer>, IVersionEntity<Integer>, Serializable`（类注解 `@Data`、`@EqualsAndHashCode(callSuper = true)`）
+`public abstract class PojoBaseEntity extends BaseModel implements IAuditEntity<Long>, ILogicDeleteEntity<Long>, IVersionEntity<Integer>, Serializable`（类注解 `@Data`、`@EqualsAndHashCode(callSuper = true)`）
 
 | 字段 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `id` | `Long` | — | 主键 |
 | `createBy` / `updateBy` | `Long` | — | 操作人 ID |
 | `createTime` / `updateTime` | `LocalDateTime` | — | 审计时间 |
-| `deleted` | `Integer` | `0` | 逻辑删除标识（0 正常，1 已删除） |
+| `deletedId` | `Long` | `0` | 逻辑删除标识（默认 `0`；类未实现 `getDeleted()` / `setDeleted()`） |
 | `version` | `Integer` | `1` | 乐观锁版本号 |
 
 ### 5.2 `PojoTenantEntity`
 
-`public abstract class PojoTenantEntity extends PojoBaseEntity implements ITenantEntity`，新增 `String tenantId`。
+`public abstract class PojoTenantEntity extends PojoBaseEntity implements ITenantEntity`，新增 `TenantId tenantId`。
 
 > 两个类均为 `abstract`，需由业务实体继承。
 

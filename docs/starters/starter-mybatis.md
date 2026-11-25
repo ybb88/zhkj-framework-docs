@@ -36,9 +36,8 @@ io.github.ybb88.framework.mybatis
 ├── base/
 │   ├── MybatisAuditEntity.java          # 审计字段基类（泛型主键）
 │   ├── MybatisBaseEntity.java           # Long 雪花主键
-│   ├── MybatisHistoricBaseEntity.java
-│   ├── MybatisLogicEntity.java          # + isDeleted（@TableLogic）
-│   ├── MybatisTenantEntity.java         # + tenantId（ITenantEntity）
+│   ├── MybatisLogicEntity.java          # + deletedId（@TableLogic）
+│   ├── MybatisTenantEntity.java         # + tenantId（TenantId，ITenantEntity）
 │   ├── MybatisTenantLogicEntity.java    # 租户 + 逻辑删除
 │   ├── BaseRepository.java              # 扩展 IService 的仓储接口
 │   └── BaseRepositoryImpl.java
@@ -63,7 +62,8 @@ io.github.ybb88.framework.mybatis
 │   ├── MybatisTenantAutoConfiguration.java
 │   ├── MybatisTenantHandler.java        # TenantLineHandler
 │   ├── MybatisTenantInterceptor.java    # TenantLineInnerInterceptor
-│   └── MybatisTenantProperties.java     # zhkj.tenant.mybatis.*
+│   ├── MybatisTenantProperties.java     # zhkj.tenant.mybatis.*
+│   └── TenantIdTypeHandler.java         # TenantId <-> BIGINT 类型处理器
 └── util/PageUtil.java
 ```
 
@@ -99,14 +99,14 @@ zhkj:
       column: tenant_id
       tables: []
       ignore-tables: [sys_tenant, sys_dict]
-      default-tenant-id: "00000000"
+      default-tenant-id: "10000001"
     mybatis:                                # 可选：显式字段覆盖全局默认，仅影响 MyBatis
       column: tenant_id
   datascope:
     enabled: true                           # 默认 false
 ```
 
-`mybatis-plus.global-config.db-config` 的逻辑删除字段须与实体的 `@TableLogic` 字段一致。
+`deleted_id` 逻辑删除语义：未删除为 `0`，删除时写入记录主键 ID。框架在 `MybatisPlusConfiguration` 中固定 `db-config.logic-delete-value=id`，删除生成 `SET deleted_id = id`；实体 `@TableLogic` 字段 `deletedId`（`Long`）对应列 `deleted_id BIGINT UNSIGNED DEFAULT 0`，无需也不应再配置 `logic-delete-value`。
 
 ---
 
@@ -132,7 +132,7 @@ zhkj:
 3. 适配使用 Spring Binder 的实际绑定结果，不通过属性默认值猜测是否配置。MyBatis 使用独立的默认规则提供者实例，不修改共享全局配置或其他 ORM 的规则。
 4. 应用自定义的 `TenantRuleProvider` 始终优先（包括直接注册的 `DefaultTenantRuleProvider`、其子类或代理）；上述 MyBatis 配置不会覆盖自定义提供者的列名或表级裁决。
 
-租户 ID 仍由规则提供者解析，优先受控委托租户，其次 `TenantContext` 或 `FrameworkContext` 快照；配置适配不会自行授予忽略租户隔离的权限。默认提供者在完全无上下文时返回框架默认租户 ID；`default-tenant-id` 仅用于处理器未获得提供者 ID 时的兜底，不覆盖提供者已经返回的 ID。
+租户 ID 由规则提供者解析；处理器在调用自定义规则提供者前，也会对委托目标或票据直接拒绝，不会因为 `grantTicket` 切换任意 SQL 的租户。其他情况下按主体 `TenantContext`、`FrameworkContext` 快照解析。默认提供者在完全无上下文时返回框架默认租户 ID；`default-tenant-id` 仅用于处理器未获得提供者 ID 时的兜底，不覆盖提供者已经返回的 ID。
 
 若裁剪自动配置、未装配任何 `TenantRuleProvider`，处理器保留使用 `zhkj.tenant.mybatis.*` 的内建路径，此时不继承全局字段规则。
 

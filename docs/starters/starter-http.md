@@ -131,7 +131,7 @@ zhkj:
 | `X-Trace-Id` | `TraceUtil.getTraceId()` 或入站头 |
 | `zhkj-auth`、`Authorization`、`tenant-id` 等 | 入站请求白名单复制 |
 
-**安全行为变更**：普通 RPC 与公共展示端点默认脱敏，携带上述标记不会再关闭 `@Desensitize`。明文取数由接收宿主先完成调用方认证和目标内部端点授权，再受控设置当前 ServletRequest 的 `RpcRequestAttribute.DESENSITIZE_AUTHORIZED` 为 `Boolean.TRUE`，在 `finally` 删除。客户端 provider 不设置也不传播此授权属性；不得将 Header 转换为授权属性。机器认证不是跨租户授权，委托头另需服务端 `TENANT_DELEGATION_AUTHORIZED` 请求属性。迁移步骤见 `starter-web.md` 第 11 节。
+**安全行为变更**：普通 RPC 与公共展示端点默认脱敏，携带上述标记不会再关闭 `@Desensitize`。明文取数由接收宿主先完成调用方认证和目标内部端点授权，再受控设置当前 ServletRequest 的 `RpcRequestAttribute.DESENSITIZE_AUTHORIZED` 为 `Boolean.TRUE`，在 `finally` 删除。客户端 provider 不设置也不传播此授权属性；不得将 Header 转换为授权属性。机器认证、委托头与 `TENANT_DELEGATION_AUTHORIZED` 标志均不是跨租户请求授权，目前通用委托请求默认拒绝。迁移步骤见 `starter-web.md` 第 11 节。
 
 ---
 

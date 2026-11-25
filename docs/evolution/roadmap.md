@@ -27,7 +27,7 @@
 - [x] 数据权限 UPDATE / DELETE 行级 AST 改写与恒假条件防穿透（`starter-datascope` + `starter-mybatis`）
 - [x] Spring Data JPA 国密存储加密（`starter-jpa` + `starter-crypto`，`CryptoAttributeConverter`）
 - [x] 统一安全上下文与 Redis Token 黑名单（`starter-secure` 的 `RedisTokenBlacklistService` + `starter-sso-client`）
-- [x] 通用单点登录客户端（`starter-sso-client`：`cleanPath` 路径规整、授权码换 Token、Cookie/Header 映射、`SsoUserContext` 继承 `ZhkjUser`）
+- [x] 通用单点登录客户端（`starter-sso-client`：`cleanPath` 路径规整、授权码换 Token、仅请求头令牌认证（不读取 Cookie）、`SsoUserContext` 继承 `ZhkjUser`）
 - [x] 分布式锁切面与注解 `@DistributedLock`（`starter-redis`：Lua 持有者校验、SpEL Key、失败抛出 `DistributedLockException`）
 - [x] MyBatis-Plus 拦截器顺序编排（`Tenant -> DataScope -> Custom -> Pagination`，见 `overview.md` 第 3.4 节）
 - [x] 系统性硬伤治理（默认加解密种子已移除；SM2 与 Redis 监听使用 UTF-8；`SqlKeyword` 正则静态预编译；Kafka `failure` 回调清理上下文；`StringPool`/`CharPool` 改为 final 类）

@@ -306,7 +306,7 @@ public class OrderPaymentService {
 | `GLOBAL` | `g:<缓存名>:` |
 | `TENANT` | `t:<租户ID>:<缓存名>:` |
 | `DIMENSION` | `t:<租户ID>:d:<维度ID>:<缓存名>:`（无维度 ID 时省略 `d:` 段） |
-| `DELEGATED` | `del:<委托租户ID>:<缓存名>:`；无委托或无票据时降级为 `TENANT` 前缀 |
+| `DELEGATED` | 一律拒绝解析；当前无可核验的逐请求业务委托授权，不生成跨租户缓存命名空间 |
 
 `ScopeCacheEvictor` 提供 `evictByTenant(tenantId)`、`evictByDimension(tenantId, dimensionId)`、`evictByPattern(pattern)`，均返回删除数量，使用 `StringRedisTemplate` 扫描删除。
 

@@ -37,7 +37,7 @@
 ### ADR-002: Jackson 3 现代化全面升级与 Jackson 2 兼容层治理
 - **状态**: 已落地 (Accepted & Implemented)
 - **实施现状（核对于工作树）**: `JacksonConfiguration` 使用 `DateTimeFeature.WRITE_DATES_AS_TIMESTAMPS`；`RedisTemplateConfiguration` 使用 `RedisSerializer.json()`。
-- **实施现状补充（`[待确认]`）**: 决策第 2 项所述“Jackson 2 兼容层”在源码中未找到独立实现（框架源码未引用 `com.fasterxml.jackson`，见 `coding-spec.md` 第 5.3 节）。
+- **实施现状补充（`[待确认]`）**: 决策第 2 项所述“Jackson 2 兼容层”在源码中未找到独立实现；但 `zhkj-framework-core` 的 `tenant/TenantId.java:3-4` 引用了 `com.fasterxml.jackson.annotation`（`JsonCreator`、`JsonValue`），见 `coding-spec.md` 第 5.3 节。
 - **背景**: 业界 JSON 序列化演进至 Jackson 3 (`tools.jackson.*`)，废弃了原 2.x 的很多低效同步阻塞逻辑。
 - **决策**:
   1. 框架底层核心统一基于 `tools.jackson.core:jackson-databind` 3.x 构建；
@@ -60,7 +60,7 @@
 
 ### ADR-004: 统一上下文生命周期门面 (`FrameworkContext`) 与 ThreadLocal 安全治理
 - **状态**: 已落地 (Accepted & Implemented)
-- **实施现状（核对于工作树）**: `FrameworkContext.clearAll()`（`FrameworkContext.java` L240-L270）清理快照、SPI 提供者、`DesensitizeContext`、`SecurityContextHolder`、`TenantContext`、`SsoContextHolder`、`DataScopeContext` 及自定义清理器；后四者通过反射按类名调用 `clear`（L257-L260）。Kafka 侧 `KafkaTraceRecordInterceptor` 在 `afterRecord` / `failure` 中经 `clearContext()` 的 `finally` 调用 `clearAll()`（`KafkaTraceRecordInterceptor.java:117-131`）。
+- **实施现状（核对于工作树）**: `FrameworkContext.clearAll()`（`FrameworkContext.java` L240-L270）清理快照、SPI 提供者、`DesensitizeContext`、`SecurityContextHolder`、`TenantContext`、`SsoContextHolder`、`DataScopeContext` 及自定义清理器；后四者通过反射按类名调用 `clear`（L258-L261）。Kafka 侧 `KafkaTraceRecordInterceptor` 在 `afterRecord` / `failure` 中经 `clearContext()` 的 `finally` 调用 `clearAll()`（`KafkaTraceRecordInterceptor.java:117-131`）。
 - **背景**: 原有多租户、安全身份、SSO 凭证分散在各自的 ThreadLocal 中，在线程池并发复用场景下容易出现串号或内存泄漏；使用 `InheritableThreadLocal` 容易在子线程复用时隐式继承污染。
 - **决策**:
   1. 在 `core` 模块建立统一门面 `FrameworkContext`，采用显式 `ThreadLocal` 纳管快照；
@@ -102,7 +102,7 @@
 
 ### ADR-008: 全工程系统性架构治理、零业务渗透、GC 性能与上下文内存安全加固 (2026.4.1.0-SNAPSHOT)
 - **状态**: 已落地 (Accepted & Implemented)
-- **实施现状（逐条核对于工作树）**: (1) 默认种子已移除，框架源码无 `zhkj-ncap` 字样 ✓；(2) `SM2Util.java:124` 使用 `UTF_8`，框架源码无无参 `getBytes()` ✓；(3) `SqlKeyword.java:21` 为静态 `Pattern` ✓；(4) `KafkaTraceRecordInterceptor.java:117` 已实现 `failure` 回调 ✓；(5) `MybatisDataScopeInterceptor.java:49-53` 改为静态 `ThreadLocal` 并注册清理器 ✓，但 `AuditUserProvider` 仍经 `SpringUtil.getBean` 获取（`:217`），未改为 `ObjectProvider`，部分完成；(6) 工具类 `final` 与私有构造器，除 `SpringUtil`（`:15`）外 ✓；(7) `StringPool`/`CharPool` 为 final class ✓。
+- **实施现状（逐条核对于工作树）**: (1) 默认种子已移除，框架源码无 `zhkj-ncap` 字样 ✓；(2) `SM2Util.java:124` 使用 `UTF_8`，框架源码无无参 `getBytes()` ✓；(3) `SqlKeyword.java:21` 为静态 `Pattern` ✓；(4) `KafkaTraceRecordInterceptor.java:117` 已实现 `failure` 回调 ✓；(5) `MybatisDataScopeInterceptor.java:49-53` 改为静态 `ThreadLocal` 并注册清理器 ✓；`AuditUserProvider` 已通过 `ObjectProvider` 注入（`:61`、`:214`），仅 provider 为空时回退 `SpringUtil.getBean`（`:217`），部分完成；(6) 工具类 `final` 与私有构造器，除 `SpringUtil`（`:15`）外 ✓；(7) `StringPool`/`CharPool` 为 final class ✓。
 - **背景**: 在框架 18 模块全景排查中识别出 5 项高危架构硬伤与多项技术债务：加解密种子硬编码业务代号 `zhkj-ncap`、SM2/Redis 字符集依赖平台编码引发乱码、SqlKeyword 每次查询动态编译正则造成 Minor GC 抖动、Kafka 单条消费异常未清理上下文、MybatisDataScopeInterceptor ThreadLocal 内存挂起，以及全工程工具类缺少 private 构造器防线。
 - **决策**:
   1. **零业务反向渗透**: 拔除 `starter-crypto` 中硬编码的 `zhkj-ncap` 种子，升级为框架级中立密钥；
@@ -126,7 +126,7 @@
      - 仅当服务端在调用方认证与目标内部端点授权后，将当前 ServletRequest 的 `RpcRequestAttribute.DESENSITIZE_AUTHORIZED` 设置为 `Boolean.TRUE` 时，才触发 `DesensitizeContext.disable()`；`X-Internal-RPC: true` 仅为传输标记，普通 RPC 与公共展示端点默认脱敏；
      - 未授权请求显式启用脱敏；脱敏过滤器在 `finally` 恢复进入过滤器前的开关状态以支持嵌套调用，而非无条件 `enable()`。授权方在 `finally` 删除请求属性，外层 `FrameworkContextClearFilter` 清理请求上下文；请求属性不得从 Header 或 ThreadLocal 推断。
      - **2026-11-10 安全行为变更**：宿主认证过滤器必须先于脱敏过滤器的 `HIGHEST_PRECEDENCE + 20` 执行，复用宿主认证机制，仅在已保护内部路径完成调用方认证与目标端点授权后赋权；正确机器凭据不使公共展示 API 获得明文权限，没有明文业务需求的内部端点不应赋权。
-     - **迁移边界**：旧标记头不再授予明文或委托权限；宿主须接入认证、端点授权及请求属性作用域清理。委托头另需 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED == Boolean.TRUE`，机器认证不是跨租户授权；可信 JWT 声明上下文保留。网关在匿名、disabled 与认证路径均剥离三个内部头（`X-Internal-RPC`、`X-Delegated-Tenant-Id`、`X-Grant-Ticket`）。
+     - **迁移边界（2026-11-21）**：旧标记头不再授予明文或委托权限；通用委托票据无签发和逐请求验证契约，`TENANT_DELEGATION_AUTHORIZED` 标志与可信 JWT 委托声明也不能开放跨租户 SQL 或写入。网关在匿名、disabled 与认证路径均剥离三个内部头（`X-Internal-RPC`、`X-Delegated-Tenant-Id`、`X-Grant-Ticket`）。
   2. **Anti-FQCN 纯净化铁律**:
      - 确立 Anti-FQCN 绝对红线：严禁在类成员、局部变量、方法入参、返回值、泛型、强转或注解声明中使用带包路径的内联全类名；所有依赖必须 100% 提取并在文件头部（package 声明下方）集中显式 `import` 纯类名；
   3. **DigestUtil 字节流与多源摘要扩展**:

@@ -10,7 +10,7 @@
 
 1. **统一客户端配置**: 生产者与消费者工厂由本模块装配，参数来自 `zhkj.kafka.*`，Key 与 Value 序列化器固定为 String。
 2. **高阶门面**: `ZhkjKafka` 将对象负载序列化为 JSON 字符串后发送，并写入 TraceId 头。
-3. **生产端透传**: `KafkaContextProducerInterceptor` 将 TraceId、租户、维度、委托、票据与操作人信息写入 Record Header。
+3. **生产端透传**: `KafkaContextProducerInterceptor` 将 TraceId、主体租户、维度与操作人信息写入 Record Header；不转发未核验委托或票据。
 4. **消费端还原**: `KafkaTraceRecordInterceptor` 与 `KafkaTraceBatchInterceptor` 从 Header 还原 `FrameworkContext` 与 TraceId，并在完成后清理。
 
 ---
@@ -110,8 +110,7 @@ zhkj:
 | `X-Trace-Id` | `TraceUtil.getTraceId()`，为空时生成 |
 | `X-Tenant-Id` | `FrameworkContext` 快照 `tenantId` |
 | `X-Dimension-Id` | `dimensionId` |
-| `X-Delegated-Tenant-Id` | `delegatedTenantId` |
-| `X-Grant-Ticket` | `grantTicket` |
+| `X-Delegated-Tenant-Id` / `X-Grant-Ticket` | 不生成；无可信票据授权契约 |
 | `X-User-Id` | `userId` |
 | `X-User-Account` | `userAccount` |
 | `X-User-Name` | `userName` |
@@ -125,6 +124,7 @@ zhkj:
 
 1. 设置 MDC 中的 `traceId`（缺失时生成）；
 2. 从 Header 构造 `ContextSnapshot`，租户取 `X-Tenant-Id`，其次 `tenant-id`、`zhkj-tenant-id`；
+   对入站委托目标与票据不恢复到上下文，不能借 Kafka 消息建立跨租户权限；
 3. 非空快照调用 `FrameworkContext.restore`。
 
 完成后（单条：`success`、`failure`、`afterRecord`；批次：`success`、`failure`）调用 `clearContext()`，其实现为 `try { FrameworkContext.clearAll(); } finally { TraceUtil.clearTraceId(); }`，即使清空过程异常也会清理 TraceId。

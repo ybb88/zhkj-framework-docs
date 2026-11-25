@@ -82,6 +82,8 @@ io.github.ybb88.framework
 │   ├── FastStringWriter.java
 │   ├── Kv.java                 # 链式键值对 (LinkedCaseInsensitiveMap)
 │   └── StrFormatter.java
+├── tenant/
+│   └── TenantId.java           # 正整数 BIGINT 租户标识值对象（of / parse / value）
 ├── validation/                 # Bean Validation 注解
 │   ├── Mobile.java / IdCard.java / CreditCode.java
 │   └── validator/MobileValidator.java, IdCardValidator.java, CreditCodeValidator.java
@@ -189,7 +191,7 @@ io.github.ybb88.framework
 | `TraceConstant` | `TRACE_ID`(MDC 键 `traceId`)、`HTTP_HEADER_TRACE_ID`、`KAFKA_HEADER_TRACE_ID`（均为 `X-Trace-Id`）、`TRACE_ID_LENGTH = 32` |
 | `CryptoConstant` | `ALGO_SM4`、`ALGO_AES`、`ALGO_SM3`、`ALGO_HMAC_SM3`、`ALGO_HMAC_SHA256`、`PREFIX_SM4`(`sm4:`)、`PREFIX_V1`(`v1:`)、`PREFIX_SM4_V1`(`sm4:v1:`)、`SUFFIX_HASH`(`Hash`)、`SUFFIX_CIPHER`(`Cipher`) |
 | `AppConstant` | `DEV_CODE`(`dev`)、`UAT_CODE`(`test`)、`PRD_CODE`(`prod`)、`SYSTEM_ENV`(`zhkj.env`)、`SYSTEM_NAME`(`zhkj.name`)、`SYSTEM_GROUP`(`zhkj.group`)、`SYSTEM_ZHKJ`(`zhkj`)、`OS_NAME_LINUX`(`LINUX`)、`APPLICATION_VERSION`(`3.0.0`) |
-| `ZhkjConstant` | `DEFAULT_SUCCESS_MESSAGE`(`操作成功`)、`DEFAULT_FAILURE_MESSAGE`、`DEFAULT_NULL_MESSAGE`(`暂无承载数据`)、`ADMIN_TENANT_ID`(`00000000`)、`TOP_PARENT_ID`(0L)、`DB_IS_DELETED`(1) 等 |
+| `ZhkjConstant` | `DEFAULT_SUCCESS_MESSAGE`(`操作成功`)、`DEFAULT_FAILURE_MESSAGE`、`DEFAULT_NULL_MESSAGE`(`暂无承载数据`)、`ADMIN_TENANT_ID`(`10000001`)、`TOP_PARENT_ID`(0L) 等 |
 | `RoleConstant` | `ADMIN`(`administrator`)、`USER`(`user`)、`TEST`(`test`)、`SUPER_ADMIN`(`super_admin`)、`SYS_ADMIN`(`sys_admin`)、`SEC_ADMIN`(`sec_admin`)、`AUDIT_ADMIN`(`audit_admin`) |
 
 ### 4.6 展示态脱敏
@@ -198,6 +200,7 @@ io.github.ybb88.framework
 - `DesensitizeType` 共 7 种：`CHINESE_NAME`、`ID_CARD`、`MOBILE_PHONE`、`BANK_CARD`、`EMAIL`、`PASSWORD`、`CUSTOM`。
 - `DesensitizeContext`：线程级开关，`disable()`、`enable()`、`isDisabled()`、`clear()`。`starter-web` 的 `InternalRpcDesensitizeFilter` 使用该开关。
 - `DesensitizeUtil`：`mobilePhone`、`idCard`、`bankCard`、`password`、`chineseName`、`email`、`maskAround(str, prefixKeep, suffixKeep)`、`desensitize(origin, DesensitizeType)`、`autoDesensitize(fieldName, value)`。
+- `DesensitizeUtil.email` 对单字符本地部分（如 `a@example.com`）输出掩码 `a*@example.com`，此前原样输出明文；输入无 `@` 时原样返回。
 - `DesensitizeRuleProvider` SPI 与 `DefaultStaticRuleProvider`（默认实现）负责按字段解析规则。
 
 ### 4.7 校验注解

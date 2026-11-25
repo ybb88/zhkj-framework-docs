@@ -61,7 +61,7 @@ io.github.ybb88.framework.sso.client
 | `FilterRegistrationBean<SsoClientFilter>` | Servlet Web 应用 |
 | `SsoGatewayGlobalFilter` | 类路径存在 `org.springframework.cloud.gateway.filter.GlobalFilter` |
 
-`SsoContextSnapshotProvider.capture` 除保存 `SSO_USER_CONTEXT`、租户与用户信息外，还将当前 `SsoUserContext` 的 `dimensionId`、`delegatedTenantId`、`grantTicket` 写入统一上下文快照，使已建立的维度与委托上下文可通过 `FrameworkContext` 读取。快照携带的是上下文数据，不包含 `RpcRequestAttribute` 服务端请求授权属性，不能据此授予新的脱敏或跨租户权限。
+`SsoContextSnapshotProvider.capture` 保留会话上下文数据；委托目标与票据不是请求级授权。`SsoClientFilter` 对携带委托目标或票据声明的身份在执行下游前拒绝请求，委托头即使存在服务端请求标志也不被读取。
 
 ---
 
@@ -119,9 +119,9 @@ zhkj:
    - 失败：记录 ERROR 日志，302 重定向到去除 `code`、`state` 的当前 URL。
 3. 否则通过 `SecureUtil.getToken(request)` 取令牌（仅请求头），调用 `TokenAuthenticator.authenticate(token, claims -> SsoTokenParser.buildUserContext(claims, token))`。
 4. 认证失败：清理 `FrameworkContext`。若为 AJAX（`X-Requested-With: XMLHttpRequest`、`Accept` 含 `application/json`，或路径以 `/api/` 开头）返回 401 JSON；否则 302 到 `{auth-server-url}/oauth2/authorize?response_type=code&client_id=...&redirect_uri=...`。
-5. 认证成功：读取 `X-Dimension-Id`；仅当当前请求的 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED` 属性为 `Boolean.TRUE`，且同时存在 `X-Delegated-Tenant-Id` 与 `X-Grant-Ticket` 时，才接受委托头；写入 `SsoContextHolder` 与 `SecurityContextHolder`；经 `FrameworkContext` 同步租户、维度与委托；执行后续过滤器；`finally` 中调用 `FrameworkContext.clearAll()`，清理 `SsoContextHolder`、`SecurityContextHolder`、`TenantContext` 及脱敏与数据权限上下文。该 `finally` 仅包围 `chain.doFilter`；身份写入发生在其之前，异常路径由外层 `FrameworkContextClearFilter`（`starter-web`）兜底清理。
+5. 认证成功：若身份中携带委托租户或票据声明，返回 403 且不执行下游；否则读取 `X-Dimension-Id`，忽略 `X-Delegated-Tenant-Id` 与 `X-Grant-Ticket`；写入 `SsoContextHolder`、`SecurityContextHolder` 与 `FrameworkContext` 并执行后续过滤器，`finally` 清理请求上下文。
 
-**委托迁移**：`X-Internal-RPC: true` 不再授予委托权限。宿主须先完成调用方认证、目标端点及租户委托权限校验，再受控设置上述请求属性，并在包围下游处理的 `finally` 中删除；不得从 Header 或 ThreadLocal 推断授权。机器凭据验证与 `DESENSITIZE_AUTHORIZED` 均不能替代委托授权，可信 JWT 声明建立的现有上下文不受本次变更影响。普通 RPC 与公共展示端点仍默认脱敏。
+**委托迁移**：可信 JWT 委托声明、请求头及 `TENANT_DELEGATION_AUTHORIZED` 标志均不构成当前业务操作授权。尚无可核验的票据签发和资源/行为/审批绑定契约，跨租户请求默认拒绝，普通 RPC 与公共展示端点仍默认脱敏。
 
 ### 5.2 网关过滤器
 

@@ -37,6 +37,7 @@ io.github.ybb88.framework.jpa
     ├── JpaTenantFilterConstant.java
     ├── JpaTenantFilterEnabledResolver.java
     ├── JpaTenantIdResolver.java
+    ├── TenantIdAttributeConverter.java
     └── listener/TenantEntityListener.java
 ```
 
@@ -55,7 +56,7 @@ io.github.ybb88.framework.jpa
 | :--- | :--- | :--- |
 | `zhkj.tenant.enabled` | `false` | 为 `true` 时执行租户过滤与写入校验；关闭时仍注册参数解析器，使普通 JPA 和显式租户字段实体均可工作 |
 
-有效租户统一委托 `TenantRuleProvider.resolveTenantId()`，不读取请求 Header。默认 provider 支持已授权委托上下文与安全上下文自愈；无上下文时返回其默认租户 `0`，仍执行等值隔离，绝不放开全表。自定义 provider 返回 `null` 或空白时抛出 `ServiceException(ResultCode.UN_AUTHORIZED)`。
+有效租户统一委托 `TenantRuleProvider.resolveTenantId()`，不读取请求 Header。默认 provider 对未经逐请求校验的委托目标或票据直接拒绝，其他情况下从主体租户与安全上下文自愈；无上下文时返回其默认租户 `0`，仍执行等值隔离，绝不放开全表。自定义 provider 返回 `null` 或空白时抛出 `ServiceException(ResultCode.UN_AUTHORIZED)`。
 
 JPA 只使用 `zhkj.tenant.enabled` 开关，没有独立的租户列名或表忽略配置。需要隔离的实体继承 `JpaTenantEntity`，列固定为 `tenant_id`；公共实体使用 `JpaBaseEntity`。此适配器只使用 provider 的有效租户解析，不使用表忽略或二级维度接口。
 
@@ -89,7 +90,7 @@ zhkj:
 
 ### 4.1 `JpaBaseEntity`
 
-`@MappedSuperclass`、`@EntityListeners(AuditingEntityListener.class)`，`public abstract class JpaBaseEntity implements IAuditEntity<Long>, ILogicDeleteEntity<Integer>, Serializable`。
+`@MappedSuperclass`、`@EntityListeners(AuditingEntityListener.class)`，`public abstract class JpaBaseEntity implements IAuditEntity<Long>, ILogicDeleteEntity<Long>, Serializable`。
 
 | 字段 | 列 | 注解 |
 | :--- | :--- | :--- |
@@ -98,13 +99,13 @@ zhkj:
 | `createTime` | `create_time`（不可更新） | `@CreatedDate` |
 | `updateBy` | `update_by` | `@LastModifiedBy` |
 | `updateTime` | `update_time` | `@LastModifiedDate` |
-| `isDeleted` | `is_deleted`，默认 `0` | — |
+| `deletedId` | `deleted_id`（`BIGINT UNSIGNED`），默认 `0` | — |
 
-> **代码现状**: `ILogicDeleteEntity<T>` 声明 `getDeleted()` / `setDeleted(T)`；`JpaBaseEntity` 通过 Lombok 生成 `getIsDeleted()` / `setIsDeleted()`，未实现 `getDeleted()` / `setDeleted()`（见 `JpaBaseEntity.java:28`、`:70-71`）。`JpaBaseEntity` 为抽象类，未实现接口方法不产生编译错误；具体实体须自行实现这两个方法（参考 `JpaTenantIsolationTest.java:298-302`）。
+> **代码现状**: `ILogicDeleteEntity<T>` 声明 `getDeleted()` / `setDeleted(T)`；`JpaBaseEntity` 通过 Lombok 生成 `getDeletedId()` / `setDeletedId()`，未实现 `getDeleted()` / `setDeleted()`（见 `JpaBaseEntity.java:28`、`:70-71`）。`JpaBaseEntity` 为抽象类，未实现接口方法不产生编译错误；具体实体须自行实现这两个方法（参考 `JpaTenantIsolationTest.java:298-302`）。
 
 ### 4.2 `JpaTenantEntity`
 
-`@MappedSuperclass`、`@EntityListeners(TenantEntityListener.class)`，继承 `JpaBaseEntity` 并实现 `ITenantEntity`，新增字段 `tenantId`（列 `tenant_id`，`nullable = false`、`updatable = false`）。加载或新增成功后记录原始租户，更新时校验实体归属没有被改写。
+`@MappedSuperclass`、`@EntityListeners(TenantEntityListener.class)`，继承 `JpaBaseEntity` 并实现 `ITenantEntity`，新增字段 `tenantId`（类型 `TenantId`，列 `tenant_id`，经 `TenantIdAttributeConverter` 映射 `BIGINT`，`nullable = false`、`updatable = false`）。加载或新增成功后记录原始租户，更新时校验实体归属没有被改写。
 
 ### 4.3 `TenantEntityListener`
 
@@ -170,7 +171,7 @@ public class CustomerEntity extends JpaTenantEntity {
 - `applyToLoadByKey=true` 同时约束触发数据库读取的主键查找；实体生命周期监听器校验受管理实体新增、更新。原生 SQL 与绕过实体生命周期的批量 DML 不属于监听器校验边界，业务应显式加入租户条件，不能把任意原生 SQL 当作自动隔离查询。
 - 只继承 `JpaBaseEntity` 的非租户实体不绑定过滤器；关闭 `zhkj.tenant.enabled` 不影响普通 JPA 使用，也不强制引入 Servlet/MVC。
 
-回归测试 `JpaTenantIsolationTest` 使用独立 H2 内存数据库，覆盖无 OSIV 的事务查询与主键隔离、请求上下文清理后复用 Session 的参数更新、已授权委托、跨租户新增/更新/改写归属拒绝、空策略租户拒绝及禁用分支。测试不连接外部数据库。
+回归测试 `JpaTenantIsolationTest` 使用独立 H2 内存数据库，覆盖无 OSIV 的事务查询与主键隔离、请求上下文清理后复用 Session 的参数更新、未核验委托的读写拒绝、跨租户新增/更新/改写归属拒绝、空策略租户拒绝及禁用分支。测试不连接外部数据库。
 
 ---
 

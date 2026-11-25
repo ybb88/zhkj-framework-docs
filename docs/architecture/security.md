@@ -97,10 +97,10 @@ public class CustomerVo {
 1. **脱敏授权**：仅当当前 ServletRequest 的 `RpcRequestAttribute.DESENSITIZE_AUTHORIZED` 属性为 `Boolean.TRUE` 时，才在请求线程内调用 `DesensitizeContext.disable()`；请求头、字符串 `"true"` 或 ThreadLocal 均不能作为该授权的来源。
 2. **认证先行**：宿主认证过滤器必须先于 `HIGHEST_PRECEDENCE + 20` 执行，在已保护的内部路径完成调用方认证与目标端点授权后，才设置该属性并进入下游过滤器。公共展示 API 不因机器凭据正确而获得明文权限；没有明文业务需求的内部端点不应赋权。
 3. **请求内清理**：未授权请求显式启用脱敏；无论是否授权，脱敏过滤器均在 `finally` 恢复进入过滤器前的开关状态以支持嵌套调用，并非无条件调用 `enable()`。设置授权属性的宿主过滤器在 `finally` 删除属性；外层 `FrameworkContextClearFilter` 清理 `FrameworkContext`，不将授权保存到线程或异步快照。
-4. **委托单独授权**：接收 `X-Delegated-Tenant-Id` 与 `X-Grant-Ticket` 另需当前请求的 `RpcRequestAttribute.TENANT_DELEGATION_AUTHORIZED == Boolean.TRUE`。宿主必须先认证并校验目标端点及租户委托权限，再受控设置并在 `finally` 删除；机器认证、脱敏授权与 `X-Internal-RPC` 均不等于跨租户授权。基于可信 JWT 声明建立的现有上下文仍按原逻辑处理。
+4. **委托单独授权**：`X-Delegated-Tenant-Id`、`X-Grant-Ticket`、`TENANT_DELEGATION_AUTHORIZED` 请求属性及可信 JWT 声明都不等于资源/行为级委托审批；目前没有完整验证链，通用跨租户委托默认拒绝。机器认证、脱敏授权与 `X-Internal-RPC` 亦不授予租户权限。
 5. **入口剥离**：网关在认证路径、匿名白名单及 `enabled=false` 分支均清理 `X-Internal-RPC`、`X-Delegated-Tenant-Id`、`X-Grant-Ticket`。`starter-http` 默认 provider 仍可生成 RPC 标记，但该标记不具备授权意义。
 
-**安全行为变更与迁移**：旧版依赖 `X-Internal-RPC: true` 获取明文或接受委托头的调用不再获得相应权限。宿主应将确有业务需求的调用迁移到受认证和端点授权保护的内部路径，并在脱敏过滤器之前接入服务端请求属性契约；不得把入站 Header 值复制成授权属性，不得为公共展示端点统一赋权，也不得引入共享万能密钥或自制签名。未接入服务端授权的调用保持默认脱敏、忽略未经授权的委托头。
+**安全行为变更与迁移**：旧版依赖 `X-Internal-RPC: true` 获取明文或接受委托头的调用不再获得相应权限。确需明文字段的业务须迁移到受认证和端点授权保护的内部路径并设置脱敏请求属性；跨租户业务须另行提供逐请求审批、主体、资源/行为范围、时效、撤销校验，不能设置通用委托标志放行。未接入授权的调用保持默认脱敏和租户隔离。
 
 以上为代码契约，不代表已验证部署入口隔离、服务直连限制或全部宿主授权策略；上线前仍需按实际部署核对这些边界。
 
@@ -161,7 +161,7 @@ List<Customer> list = customerMapper.selectList(
 ### 2.4 JPA 租户读写隔离 (`starter-jpa` + `starter-tenant`)
 
 - `JpaTenantEntity` 直接声明 Hibernate 自动过滤器，覆盖查询及触发数据库读取的主键加载；`TenantEntityListener` 拒绝跨租户新增、更新和实体归属改写，不以告警日志代替阻断。
-- `JpaTenantIdResolver` 只调用 `TenantRuleProvider.resolveTenantId()`，不读取请求头、不在 Session 中缓存租户参数；受控委托须由上游按第 2.2.1 节授权后建立上下文。
+- `JpaTenantIdResolver` 只调用 `TenantRuleProvider.resolveTenantId()`，不读取请求头、不在 Session 中缓存租户参数；默认 provider 对未经逐请求校验的委托上下文直接拒绝。
 - 启用隔离时，provider 返回 `null` 或空白即拒绝操作；默认 provider 无上下文时返回租户 `0`，仍执行等值过滤，不开放全表。只有启动配置 `zhkj.tenant.enabled=false` 可关闭该隔离分支。
 - 无需 MVC 或 OSIV；请求上下文仍由 `FrameworkContext` 清理，Session 由原事务或 OSIV 生命周期管理，不改变 `spring.jpa.open-in-view=false`。
 - 不跨租户复用带已加载实体的 EntityManager，不调用 `disableFilter` 或显式覆盖租户参数。一级缓存命中不会重新执行 SQL；原生 SQL 与绕过生命周期的批量 DML 需显式限定租户，不能据此宣称全部 SQL 都被自动防护。详见 [JPA 组件](../starters/starter-jpa.md#8-session-生命周期与租户边界)。
@@ -171,8 +171,8 @@ List<Customer> list = customerMapper.selectList(
 ## 🔑 3. 统一 SSO 单点登录与安全上下文 (`starter-sso-client` / `starter-secure`)
 
 ### 3.1 核心防护机制
-1. **URI 安全清洗防绕过**：`SsoClientFilter`（第 103 行）、`SsoGatewayGlobalFilter`（第 197 行）及 `XssFilter`（第 40 行）在路径匹配前调用 Spring 的 `StringUtils.cleanPath(...)` 规范化路径，抵御 `//admin`、分号矩阵参数等绕过手法。
-2. **用户模型归一化**：`SsoUserContext` 继承 `ZhkjUser`；`SsoClientFilter` 解析 Token 后调用 `SecurityContextHolder.setUser(...)`（第 172 行）完成装配。
+1. **URI 安全清洗防绕过**：`SsoClientFilter`（第 104 行）、`SsoGatewayGlobalFilter`（第 197 行）及 `XssFilter`（第 40 行）在路径匹配前调用 Spring 的 `StringUtils.cleanPath(...)` 规范化路径，抵御 `//admin`、分号矩阵参数等绕过手法。
+2. **用户模型归一化**：`SsoUserContext` 继承 `ZhkjUser`；`SsoClientFilter` 解析 Token 后调用 `SecurityContextHolder.setUser(...)`（第 173 行）完成装配。
 3. **Token 传递方式**：认证仅接受请求头（`TokenCredentialUtil`，见 `starter-sso-client` 文档）。Cookie 名称常量 `zhkj_sso_token`、`zhkj_sso_session`（`HeaderConstant.COOKIE_SSO_TOKEN`、`COOKIE_SSO_SESSION`）已定义，但当前认证代码未读取 Cookie。Header 常量包括 `Authorization`、`Zhkj-Authorization`、`zhkj-auth`（`HeaderConstant`）。`SsoAuthClient` 的 `TokenRequestDTO.grantType` 支持 `refresh_token` 换取新 Token。
 4. **认证服务地址默认值**：`zhkj.sso.client.auth-server-url` 默认 `http://127.0.0.1:8088`（`SsoClientProperties`），生产环境需显式覆盖。
 
