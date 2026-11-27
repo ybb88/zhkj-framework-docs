@@ -1,38 +1,37 @@
 # ZHKJ Framework 安全架构与全生命周期数据保护
 
-> **文档定位**: 系统安全防护、全生命周期数据加解密体系、JJWT 0.12+ 认证、统一 SSO 单点登录客户端与分布式锁防误删安全指南  
+> **文档定位**: 系统安全防护、全生命周期数据加解密体系、JWT 认证、统一 SSO 单点登录客户端与分布式锁防误删安全指南  
 > **设计与创作者**: Jason.Yang（274107098@qq.com）  
 
 ---
 
 ## 🛡️ 1. 数据安全全生命周期三层防护模型
 
-框架在业界首创并落地了**全生命周期三层数据安全防护模型**，将隐私数据从“配置文件 $\rightarrow$ 网络传输/前端展示 $\rightarrow$ 数据库持久存储与检索”实施全流程闭环管控：
+框架将隐私数据从“配置文件 $\rightarrow$ 网络传输/前端展示 $\rightarrow$ 数据库持久存储与检索”纳入三层管控：
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 1. 配置态 (Configuration Layer)                                         │
 │    本地 application.yml 或 Nacos 配置中心中数据库密码等敏感属性通过      │
-│    ENC(...) 加密存储；由 Spring Boot 4 原生 EnvironmentPostProcessor     │
-│    在容器环境装配阶段透明解密，严禁明文凭据入库或入 Git。                │
+│    ENC(...) 加密存储；由 EncryptablePropertyEnvironmentPostProcessor     │
+│    在环境准备阶段透明解密，严禁明文凭据入库或入 Git。                    │
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 2. 传输与展示态 (Transmission & Presentation Layer)                     │
-│    - 展示态: Jackson 序列化输出时，通过 @Desensitize 注解实现手机号、    │
-│      身份证、姓名、银行卡等 10 种规则的动态掩码脱敏；                   │
-│    - 传输态: 通过 @ApiEncrypt / @ApiDecrypt 实现 Controller 接口报文     │
-│      端到端全对称密文交互 (AES / DES)。                                 │
+│    - 展示态: Jackson 序列化输出时，通过 @Desensitize 对字段做掩码脱敏    │
+│      （共 7 种内置规则，含 CUSTOM）；                                   │
+│    - 传输态: 通过 @ApiEncrypt / @ApiDecrypt 对 Controller 报文做对称加解密│
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 3. 存储与检索态 (Persistence & Storage Layer)                           │
-│    - 密文落盘: 实体敏感字段通过 EncryptTypeHandler (SM4/AES) 透明加密入库│
-│      具备事务安全阻断机制，加密失败严禁降级明文，坚决抛出 CryptoException│
-│    - 盲索引检索: 敏感字段配套生成 HMAC-SM3 加盐哈希盲索引辅助列 (*_hash)│
-│      由 ZhkjMetaObjectHandler 在新增/更新时自动注入，强一致散列防漂移。   │
+│    - 密文落盘: 实体敏感字段通过 EncryptTypeHandler 透明加密入库（SM4 或   │
+│      AES），加密失败抛出 CryptoException 阻断持久化，不降级写明文；       │
+│    - 盲索引检索: 敏感字段配套 HMAC 加盐哈希辅助列 (*_hash)，由             │
+│      ZhkjMetaObjectHandler 在新增/更新时自动注入。                        │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -53,14 +52,16 @@ zhkj:
   crypto:
     property:
       enabled: true
-      password: "YourStrongMasterKey" # 生产环境推荐通过环境变量 ZHKJ_CRYPTO_PROPERTY_PASSWORD 注入
+      password: "${ZHKJ_CRYPTO_PASSWORD}"  # 主密钥由环境变量 ZHKJ_CRYPTO_PASSWORD 注入，严禁明文入库
 ```
 
-配套命令行密文生成小工具：
+配套命令行密文生成工具（`ZhkjCryptoCli`，参数 `-e` 加密、`-d` 解密、`-p` 主密钥）：
 ```bash
 java -cp zhkj-framework-starter-crypto.jar io.github.ybb88.framework.crypto.property.ZhkjCryptoCli -e "root123456" -p "YourStrongMasterKey"
-# 输出: ENC(XyKx5jN5684AxytPGmOTAV7+XSDh/S83BwCb8aCdyGU=)
+# 输出为 ENC(...) 形式的密文
 ```
+
+主密钥与属性前缀配置项：`zhkj.crypto.property.{enabled, password, algorithm, prefix, suffix, cache-enabled}`（`ZhkjPropertyCryptoProperties`）。
 
 ---
 
@@ -85,44 +86,28 @@ public class CustomerVo {
 }
 ```
 
+内置规则（`DesensitizeType`，共 7 种）：`CHINESE_NAME`、`ID_CARD`、`MOBILE_PHONE`、`BANK_CARD`、`EMAIL`、`PASSWORD`、`CUSTOM`。
+
 #### 2.2.1 内部微服务 RPC 脱敏旁路放行机制 (`InternalRpcDesensitizeFilter`)
 > [!IMPORTANT]
-> **业务痛点与旁路需求**：
-> 在微服务体系中，部分接口既要供前端管理后台查询展示（必须打码脱敏防隐私泄漏），又要被内部其他微服务通过声明式 RPC 客户端（`@HttpExchange`）调用获取真实数据（如催收作业中心调度外呼拨号、批处理跑批计息、短信平台下发短信）。如果 RPC 获取到的是打码后的 `138****8000`，将直接导致外呼失败或严重业务事故。
+> **默认脱敏与受控取数**：
+> 普通 RPC 与公共展示端点默认执行 `@Desensitize`。确需明文字段的内部业务必须先完成调用方认证和目标端点授权；传输标记不能替代权限校验，也不能替代敏感操作所需的审批与审计。
 
-框架在 `zhkj-framework-starter-web` 中内置了高优先级过滤器 `InternalRpcDesensitizeFilter`（Ordered: `HIGHEST_PRECEDENCE + 20`）：
-1. **触发契约**：调用方在发起 HTTP/RPC 请求时携带标准请求头：
-   ```http
-   X-Internal-RPC: true
-   ```
-   常量定义于 `HeaderConstant.X_INTERNAL_RPC`。
-2. **执行流程**：
-   ```
-   微服务发起 RPC (Header: X-Internal-RPC: true)
-                     │
-                     ▼
-   InternalRpcDesensitizeFilter (探测到内部调用标识)
-                     │
-                     ▼
-   DesensitizeContext.disable() (线程作用域内临时关闭脱敏打码)
-                     │
-                     ▼
-   Controller 业务逻辑执行 & Jackson 序列化输出真实明文
-                     │
-                     ▼
-   finally { DesensitizeContext.enable(); } (立即恢复脱敏开关)
-                     │
-                     ▼
-   FrameworkContextClearFilter (请求出口处强制清空所有上下文兜底)
-   ```
-3. **零线程污染保障**：
-   - 过滤器在 `finally` 块中立即恢复脱敏开关；
-   - 无论业务执行成功还是发生异常，外层 `FrameworkContextClearFilter` 都会对 `DesensitizeContext` 执行彻底清空（`clear()`），杜绝在 Web 常驻线程池复用时发生串号或脱敏失效。
+`zhkj-framework-starter-web` 的 `InternalRpcDesensitizeFilter` 保持 `Ordered.HIGHEST_PRECEDENCE + 20`，授权契约来自 `framework-core` 的 `io.github.ybb88.framework.rpc.RpcRequestAttribute`：
+1. **脱敏授权**：仅当当前 ServletRequest 的 `RpcRequestAttribute.DESENSITIZE_AUTHORIZED` 属性为 `Boolean.TRUE` 时，才在请求线程内调用 `DesensitizeContext.disable()`；请求头、字符串 `"true"` 或 ThreadLocal 均不能作为该授权的来源。
+2. **认证先行**：宿主认证过滤器必须先于 `HIGHEST_PRECEDENCE + 20` 执行，在已保护的内部路径完成调用方认证与目标端点授权后，才设置该属性并进入下游过滤器。公共展示 API 不因机器凭据正确而获得明文权限；没有明文业务需求的内部端点不应赋权。
+3. **请求内清理**：未授权请求显式启用脱敏；无论是否授权，脱敏过滤器均在 `finally` 恢复进入过滤器前的开关状态以支持嵌套调用，并非无条件调用 `enable()`。设置授权属性的宿主过滤器在 `finally` 删除属性；外层 `FrameworkContextClearFilter` 清理 `FrameworkContext`，不将授权保存到线程或异步快照。
+4. **委托单独授权**：`X-Delegated-Tenant-Id`、`X-Grant-Ticket`、`TENANT_DELEGATION_AUTHORIZED` 请求属性及可信 JWT 声明都不等于资源/行为级委托审批；目前没有完整验证链，通用跨租户委托默认拒绝。机器认证、脱敏授权与 `X-Internal-RPC` 亦不授予租户权限。
+5. **入口剥离**：网关在认证路径、匿名白名单及 `enabled=false` 分支均清理 `X-Internal-RPC`、`X-Delegated-Tenant-Id`、`X-Grant-Ticket`。`starter-http` 默认 provider 仍可生成 RPC 标记，但该标记不具备授权意义。
+
+**安全行为变更与迁移**：旧版依赖 `X-Internal-RPC: true` 获取明文或接受委托头的调用不再获得相应权限。确需明文字段的业务须迁移到受认证和端点授权保护的内部路径并设置脱敏请求属性；跨租户业务须另行提供逐请求审批、主体、资源/行为范围、时效、撤销校验，不能设置通用委托标志放行。未接入授权的调用保持默认脱敏和租户隔离。
+
+以上为代码契约，不代表已验证部署入口隔离、服务直连限制或全部宿主授权策略；上线前仍需按实际部署核对这些边界。
 
 ---
 
-### 2.3 存储态：国密密文落盘与盲索引自动注入 (`starter-mybatis`)
-持久层严禁在业务 Service 中散落手工计算盲索引哈希。通过在实体类上采用命名约定或注解声明，由框架自动透明完成计算：
+### 2.3 存储态：国密密文落盘与盲索引自动注入 (`starter-mybatis` + `starter-crypto`)
+持久层不在业务 Service 中手工计算盲索引哈希，改由实体注解声明，`ZhkjMetaObjectHandler` 在新增与更新时自动注入：
 
 ```java
 @Data
@@ -133,19 +118,21 @@ public class Customer extends MybatisTenantEntity {
     private String customerName;
 
     /**
-     * 手机号敏感字段 (国密 SM4 存储加密)
+     * 手机号敏感字段（存储加密，SM4 或 AES，由 zhkj.storage.crypto.algorithm 决定）
      */
     @EncryptField(blindIndexField = "mobileHash")
     @TableField(typeHandler = EncryptTypeHandler.class)
     private String mobile;
 
     /**
-     * 手机号盲索引哈希列 (HMAC-SM3 国密加盐哈希)
+     * 手机号盲索引哈希列（HMAC 加盐哈希）
      */
     @BlindIndex(source = "mobile")
     private String mobileHash;
 }
 ```
+
+存储加密相关配置（`ZhkjStorageCryptoProperties`，前缀 `zhkj.storage.crypto`）：`enabled`（默认 `false`）、`write-enabled`、`algorithm`（默认 `AES`）、`key`、`version`（默认 `v1`）、`blind-index-salt`。
 
 **业务检索实战**：
 ```java
@@ -158,42 +145,47 @@ List<Customer> list = customerMapper.selectList(
 );
 ```
 
-#### 2.3.1 加解密安全阻断与合规铁律
+#### 2.3.1 加解密安全阻断
 > [!CAUTION]
-> **绝对禁止降级明文存储**：底层 `StorageCryptoEngine` 在执行敏感字段加密时具备硬性事务阻断机制。一旦发生任何加密异常（如密钥未就绪、算法提供者异常），坚决抛出 `CryptoException` 强制中断持久化事务并回滚，绝不向数据库降级写入任何明文数据，严防明文脱库合规事故。
+> `StorageCryptoEngine` 在加密失败时抛出 `CryptoException`，中断持久化。未配置 `zhkj.storage.crypto.key` 时同样抛出 `CryptoException`（`StorageCryptoEngine.java` 第 219 行附近），不使用内置默认密钥。
 
-#### 2.3.2 盲索引强一致性哈希与防哈希漂移
+#### 2.3.2 盲索引哈希与异常阻断
 > [!IMPORTANT]
-> **强一致散列与异常阻断**：
-> 1. **动态探测与算法自愈**：盲索引哈希由 `BlindIndexUtil.generateIndex(plainText)` 驱动，启动期动态嗅探运行环境优先采用国密 `HmacSM3`（在无 BouncyCastle 依赖的轻量环境平滑降级为 `HmacSHA256`）。
-> 2. **杜绝哈希漂移**：散列计算过程若遭遇不可恢复异常，直接抛出 `IllegalStateException` 阻断写入，绝不使用随机或缺省值回退，杜绝同一敏感数据在不同集群节点或时间点生成不一致散列串导致的历史数据检索失效与死数据。
-> 3. **检索语法约束**：盲索引列仅支持确定性精确等值匹配（`EQ` 或 `IN`），严禁使用 `LIKE '%...%'` 进行模糊检索。
+> 1. **算法探测**：`BlindIndexUtil` 通过 `resolveHmacAlgorithm()` 探测运行环境。存在 BouncyCastle（`BC`）Provider 且可用 `HmacSM3` 时使用 `HmacSM3`，否则降级为 `HmacSHA256`。
+> 2. **盐值强制配置**：未配置 `zhkj.storage.crypto.blind-index-salt` 时抛出 `IllegalStateException`，拒绝使用内置默认盐值。
+> 3. **计算异常阻断**：哈希计算异常时抛出 `IllegalStateException` 阻断写入，不写入缺省值。
+> 4. **检索语法约束**：盲索引列仅支持精确等值匹配（`EQ` 或 `IN`），不支持 `LIKE` 模糊检索。
+>
+> **存量待治理**：`BlindIndexUtil` 的 SPI 提供者（`ZhkjBlindIndex` 相关分支）计算失败时会记录告警并回退到默认算法（`BlindIndexUtil.java` 第 119、126、209 行）。该回退可能导致同一明文在不同算法下产生不一致的哈希，与上述第 3 条约束不一致，需确认后治理。
+
+### 2.4 JPA 租户读写隔离 (`starter-jpa` + `starter-tenant`)
+
+- `JpaTenantEntity` 直接声明 Hibernate 自动过滤器，覆盖查询及触发数据库读取的主键加载；`TenantEntityListener` 拒绝跨租户新增、更新和实体归属改写，不以告警日志代替阻断。
+- `JpaTenantIdResolver` 只调用 `TenantRuleProvider.resolveTenantId()`，不读取请求头、不在 Session 中缓存租户参数；默认 provider 对未经逐请求校验的委托上下文直接拒绝。
+- 启用隔离时，provider 返回 `null` 或空白即拒绝操作；默认 provider 无上下文时返回租户 `0`，仍执行等值过滤，不开放全表。只有启动配置 `zhkj.tenant.enabled=false` 可关闭该隔离分支。
+- 无需 MVC 或 OSIV；请求上下文仍由 `FrameworkContext` 清理，Session 由原事务或 OSIV 生命周期管理，不改变 `spring.jpa.open-in-view=false`。
+- 不跨租户复用带已加载实体的 EntityManager，不调用 `disableFilter` 或显式覆盖租户参数。一级缓存命中不会重新执行 SQL；原生 SQL 与绕过生命周期的批量 DML 需显式限定租户，不能据此宣称全部 SQL 都被自动防护。详见 [JPA 组件](../starters/starter-jpa.md#8-session-生命周期与租户边界)。
 
 ---
 
 ## 🔑 3. 统一 SSO 单点登录与安全上下文 (`starter-sso-client` / `starter-secure`)
 
 ### 3.1 核心防护机制
-1. **URI 安全清洗防绕过**：
-   `SsoClientFilter` 与 `SsoGatewayGlobalFilter` 在白名单匹配前，统一调用 `StringUtil.cleanPath(uri)` 进行规范化，有效防止利用多重斜杠（`//admin`）、分号矩阵参数（`/api;jsessionid=...`）或相对路径符号绕过鉴权。
-2. **零反射用户模型归一化**：
-   SSO 解析所得的 `SsoUserContext` 物理继承自框架核心 `ZhkjUser`，在过滤器层面直接装配到 `SecurityContextHolder` 与 `FrameworkContext`，杜绝任何反射开销与跨系统模型割裂。
-3. **双 Token 静默续期与 Cookie/Header 自由切换**：
-   开箱支持浏览器 Cookie 模式与微服务 Header 模式（`Zhkj-Auth` / `Authorization`），支持通过 RefreshToken 自动静默换取新 Token。
+1. **URI 安全清洗防绕过**：`SsoClientFilter`（第 104 行）、`SsoGatewayGlobalFilter`（第 197 行）及 `XssFilter`（第 40 行）在路径匹配前调用 Spring 的 `StringUtils.cleanPath(...)` 规范化路径，抵御 `//admin`、分号矩阵参数等绕过手法。
+2. **用户模型归一化**：`SsoUserContext` 继承 `ZhkjUser`；`SsoClientFilter` 解析 Token 后调用 `SecurityContextHolder.setUser(...)`（第 173 行）完成装配。
+3. **Token 传递方式**：认证仅接受请求头（`TokenCredentialUtil`，见 `starter-sso-client` 文档）。Cookie 名称常量 `zhkj_sso_token`、`zhkj_sso_session`（`HeaderConstant.COOKIE_SSO_TOKEN`、`COOKIE_SSO_SESSION`）已定义，但当前认证代码未读取 Cookie。Header 常量包括 `Authorization`、`Zhkj-Authorization`、`zhkj-auth`（`HeaderConstant`）。`SsoAuthClient` 的 `TokenRequestDTO.grantType` 支持 `refresh_token` 换取新 Token。
+4. **认证服务地址默认值**：`zhkj.sso.client.auth-server-url` 默认 `http://127.0.0.1:8088`（`SsoClientProperties`），生产环境需显式覆盖。
 
-### 3.2 安全上下文透传与生命周期治理 (`SecurityContextHolder`)
-> [!NOTE]
-> **基于标准 ThreadLocal 纳管生命周期**：
-> - **存储基石**：`SecurityContextHolder` 基于标准 `ThreadLocal<ZhkjUser>` 维护当前线程的用户身份，严禁使用原生 `InheritableThreadLocal` 避免线程池复用时的线程上下文泄漏与租户身份错乱。
-> - **自动清理机制**：`SecurityContextHolder` 在静态块中自动注册到 `FrameworkContext` 清理链路（`FrameworkContext.registerCleaner(SecurityContextHolder::clear)`）。
-> - **跨线程全生命周期透传**：在 Web 过滤器（`SsoClientFilter`）与消息监听拦截器（`KafkaTraceRecordInterceptor`）中，统一通过 `FrameworkContext.capture()` 获取快照，并在异步线程池、Spring Batch 批处理中通过 `FrameworkContext.openScope(snapshot)` / `runWith(...)` 建立安全作用域，执行完毕由 AutoCloseable 机制彻底清理，从根本上杜绝跨线程池污染。
+### 3.2 安全上下文的生命周期 (`SecurityContextHolder`)
+- **存储基石**：`SecurityContextHolder` 基于标准 `ThreadLocal<ZhkjUser>`（`secure/context/SecurityContextHolder.java`），不使用 `InheritableThreadLocal`。
+- **自动清理**：类静态块中调用 `FrameworkContext.registerCleaner(SecurityContextHolder::clear)`，由 `FrameworkContext.clearAll()` 统一清理。
+- **跨线程透传**：异步线程与批处理使用 `FrameworkContext.capture()` / `FrameworkContext.openScope(snapshot)`，离开 `try` 作用域后自动清理。Kafka 生产端由 `KafkaContextProducerInterceptor` 将快照写入消息 Header，消费端由 `KafkaTraceRecordInterceptor` 还原并在 `afterRecord` 中清理。
 
 ---
 
 ## 🔒 4. 高可靠分布式锁防御 (`starter-redis`)
 
-在分布式并发场景下，锁的安全性不仅在于“能否获取锁”，更在于“能否安全释放锁”：
-1. **持有者校验（Owner Check）防误删**：
-   底层通过 Lua 脚本执行释放：只有锁中存储的唯一 Value 与当前线程持有的锁标识完全一致时才执行 `DEL`，彻底防止因任务执行耗时超过租期时误释放其他节点的锁。
-2. **强类型异常体系与优雅降级**：
-   加锁失败抛出的 `DistributedLockException` 严格继承自 `BaseFrameworkException`，由全局异常处理器拦截转换为受控的 `400 Bad Request / 业务失败响应`，绝不向前端暴露未受控的 500 系统崩溃。
+分布式锁的安全性不仅在于“能否获取”，还在于“能否安全释放”：
+1. **持有者校验防误删**：释放锁通过 Lua 脚本完成，仅当锁中存储的唯一标识与当前持有者一致时才执行删除（`DistributedLockScripts`），防止任务耗时超过租期后误删他人持有的锁。
+2. **注解参数**：`@DistributedLock` 的 `key`（必填，支持 SpEL）、`prefix`、`waitTime`（默认 `0`）、`leaseTime`（默认 `30`）、`timeUnit`（默认 `SECONDS`）、`failureStrategy`、`message`、`fallbackMethod`。
+3. **失败处理**：加锁失败抛出 `DistributedLockException`，该类继承 `BaseFrameworkException`，由 `GlobalExceptionHandler` 统一处理（响应码以 handler 实现为准）。

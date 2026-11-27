@@ -1,26 +1,18 @@
 # 细粒度数据权限组件：zhkj-framework-starter-datascope
 
-> **模块定位**: 细粒度数据权限管控核心 Starter，基于 JSqlParser 抽象语法树（AST）实现动态 SQL 重写，提供 `@DataAuth` 注解、权限范围模型 `ScopeModel` 与组织架构解耦 SPI（`DeptAncestorProvider`）。  
-> **适用基准**: OpenJDK 21 (LTS), Spring Boot 4.1.1, JSqlParser  
+> **模块定位**: 数据权限抽象与模型模块。定义 `@DataAuth`、`DataScopeEnum`、`DataScopeModel`、`DataScopeContext`、`DeptAncestorProvider` SPI，并提供框架无关的 JSqlParser 行级改写引擎 `SqlDataScopeAstEngine`。MyBatis 拦截与规则查询由 `zhkj-framework-starter-mybatis` 完成。  
+> **适用基准**: OpenJDK 21, Spring Boot 4.x, JSqlParser（`mybatis-plus-jsqlparser`）  
 > **模块坐标**: `io.github.ybb88:zhkj-framework-starter-datascope`
 
 ---
 
 ## 📋 1. 架构定位与核心设计
 
-企业管理系统中，不同角色的用户在同一个租户内部查看数据的范围不同（如：仅本人、本部门、本部门及下级部门、全部数据或自定义范围）。
-
-传统方案通常在 XML 中散落手写 `AND dept_id IN (...)` 或在业务 Service 中硬拼接 SQL，极易引发 SQL 注入、跨机构越权或分页计数不准。
-
-`zhkj-framework-starter-datascope` 构建了安全的数据权限引擎：
-1. **JSqlParser 抽象语法树（AST）动态重写**：
-   - 拦截带有 `@DataAuth` 的 Mapper 方法，解析原始 SQL 为语法树对象；
-   - 构造标准的 `BinaryExpression` 节点递归安全合并进 `WHERE` 表达式，100% 语法严密、零 SQL 注入风险；
-2. **UPDATE / DELETE 行级改写闭环与恒假防穿透 (`1=0`)**：
-   - 全面支持 SELECT、UPDATE、DELETE 语句的权限改写；
-   - 当用户无任何匹配数据权限时，自动注入 `AND 1 = 0` 恒假表达式，彻底阻断全表无条件查询或批量误删；
-3. **组织拓扑解耦 SPI (`DeptAncestorProvider`)**：
-   - 框架底层不硬编码任何具体业务部门表（如 `sys_dept`）或组织字段，业务端通过实现 SPI 注入具体的部门祖先树逻辑。
+1. **注解声明**：`@DataAuth` 标注在 Mapper 方法或接口上，声明资源编码、过滤列与默认范围。
+2. **规则来源**：运行期优先读取数据库中的数据权限配置（按 Mapper 方法与角色、或按资源编码）；未命中时使用注解中的值。
+3. **SQL 改写**：`SqlDataScopeAstEngine.rewriteSql` 对 `SELECT` / `UPDATE` / `DELETE` 解析 AST，将条件以 `AND (condition)` 合并进 `WHERE`。原 `WHERE` 为顶层 `OR` 时先整体加括号。无法注入条件时（解析失败、集合运算、不支持的语句类型）抛出 `DataScopeException`，拒绝执行，不回落为原 SQL。
+4. **组织拓扑 SPI**：`DeptAncestorProvider` 提供子孙部门 ID；未提供时通过 `sys_org` 表的 `ancestors` 列查询。
+5. **管理员放行**：角色为 `administrator` 或 `super_admin` 时不做改写（见第 6 节）。
 
 ---
 
@@ -33,23 +25,33 @@
 </dependency>
 ```
 
+`zhkj-framework-starter-mybatis` 以 `<optional>true</optional>` 声明本模块，业务工程需显式引入本模块；MyBatis 侧的拦截器与规则查询 Bean 由 `starter-mybatis` 的 `MybatisDataScopeAutoConfiguration` 在 `zhkj.datascope.enabled=true` 时装配。
+
 ---
 
 ## 🧱 3. 核心包结构与 SPI
 
 ```
 io.github.ybb88.framework.datascope
-├── annotation/
-│   └── DataAuth.java                  # Mapper/方法级数据权限注解
+├── annotation/DataAuth.java                     # 方法/类级注解
+├── config/DataScopeAutoConfiguration.java       # 注册 DataScopeSnapshotProvider
+├── constant/DataScopeConstant.java              # DEFAULT_COLUMN = "create_dept"
+├── context/
+│   ├── DataScopeContext.java                    # ThreadLocal 当前数据权限模型
+│   └── DataScopeSnapshotProvider.java           # 快照属性 DATA_SCOPE_MODEL
+├── engine/SqlDataScopeAstEngine.java            # JSqlParser 改写
+├── enums/DataScopeEnum.java                     # ALL / OWN / OWN_DEPT / OWN_DEPT_CHILD / CUSTOM
+├── exception/DataScopeException.java
 ├── handler/
-│   ├── ScopeModelHandler.java         # 数据权限解析处理器 SPI
-│   └── MybatisDataScopeInterceptor.java# 基于 AST 的 MyBatis 拦截器
-├── model/
-│   ├── ScopeModel.java                # 数据权限作用域模型 (本人/部门/全部)
-│   └── DataScopeEnum.java             # 权限范围枚举 (ALL, DEPT, DEPT_AND_CHILD, SELF, CUSTOM)
-└── provider/
-    └── DeptAncestorProvider.java      # 部门树拓扑提供者 SPI
+│   ├── DataScopeHandler.java                    # 改写接口（仅 MybatisDataScopeHandler 实现，见第 8 节）
+│   └── ScopeModelHandler.java                   # 规则查询接口
+├── model/DataScopeModel.java
+├── props/DataScopeProperties.java               # zhkj.datascope.*
+├── provider/DeptAncestorProvider.java           # 子孙部门 SPI
+└── util/DataScopeSqlUtil.java                   # 规则与部门查询 SQL 构造
 ```
+
+自动装配：`DataScopeAutoConfiguration`（`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`）仅注册快照提供者 `DataScopeSnapshotProvider`（另由 `META-INF/services/io.github.ybb88.framework.context.ContextSnapshotProvider` 声明）。规则查询、拦截器等 Bean 由 `starter-mybatis` 的 `MybatisDataScopeAutoConfiguration` 在 `zhkj.datascope.enabled=true` 时注册。
 
 ---
 
@@ -58,26 +60,108 @@ io.github.ybb88.framework.datascope
 ```yaml
 zhkj:
   datascope:
-    enabled: true                      # 是否全局开启数据权限拦截 (默认: true)
+    enabled: false                       # 默认 false，需显式开启
+    mapper-key: [page, Page, list, List, update, Update, delete, Delete]
+    mapper-exclude: [FlowMapper]
+    dept-table: sys_org
+    dept-id-column: id
+    dept-ancestors-column: ancestors
+    dept-logic-delete-column: deleted_id
+    dept-logic-delete-value: "0"
+    scope-data-table: zhkj_scope_data
+    role-scope-table: zhkj_role_scope
 ```
+
+| 键 | 默认值 | 说明 |
+|----|--------|------|
+| `enabled` | `false` | 为 `true` 时装配 MyBatis 数据权限拦截器 |
+| `mapper-key` | `[page, Page, list, List, update, Update, delete, Delete]` | 无 `@DataAuth` 时，方法名包含其中任一字符串才参与改写 |
+| `mapper-exclude` | `FlowMapper` | Mapper 简单类名包含其中任一字符串时跳过（无注解时） |
+| `dept-table` | `sys_org` | 部门表名 |
+| `dept-id-column` | `id` | 部门主键列 |
+| `dept-ancestors-column` | `ancestors` | 部门祖先路径列 |
+| `dept-logic-delete-column` | `deleted_id` | 部门逻辑删除列 |
+| `dept-logic-delete-value` | `"0"` | 部门未删除值；所有表名与列名须匹配 `^[a-zA-Z0-9_]+$`（`DataScopeSqlUtil`） |
+| `scope-data-table` | `zhkj_scope_data` | 数据权限配置表 |
+| `role-scope-table` | `zhkj_role_scope` | 角色与数据权限关联表 |
 
 ---
 
-## 💡 5. 典型使用范式
+## 🧩 5. 注解与模型
 
-### 5.1 业务端实现组织树 SPI (`DeptAncestorProvider`)
-业务服务通过注入自身数据库的部门表查询方法，提供子部门 ID 列表：
+### 5.1 `@DataAuth`
+
+| 属性 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `true` | `false` 时该方法跳过改写 |
+| `code` | `""` | 资源编码，用于按资源查询规则 |
+| `column` | `create_dept` | 过滤列 |
+| `type` | `DataScopeEnum.ALL` | 范围类型 |
+| `field` | `"*"` | 复制到 `DataScopeModel.scopeField`，改写逻辑不读取 |
+| `value` | `""` | `CUSTOM` 类型的条件模板 |
+
+注解可标注在方法或 Mapper 接口上；方法上的注解优先。
+
+### 5.2 `DataScopeEnum`
+
+| 枚举 | `type` 值 | 生成条件 |
+|------|-----------|----------|
+| `ALL` | 1 | 不改写 |
+| `OWN` | 2 | `<column> = <userId>`；列为空或为 `create_dept` 时列名改为 `create_user` |
+| `OWN_DEPT` | 3 | `<column> = <deptId>`（单值；列为空时默认 `dept_id`） |
+| `OWN_DEPT_CHILD` | 4 | `<column> IN (<deptId>, <子孙部门 ID>...)`（列为空时默认 `dept_id`；仅一个 ID 时为 `=`） |
+| `CUSTOM` | 5 | `scopeValue` 经占位符替换后作为条件 |
+
+无可用 ID 时生成 `1 = 0`。
+
+### 5.3 `DataScopeModel`
+
+字段：`searched`、`resourceCode`、`scopeColumn`（默认 `create_dept`）、`scopeType`（默认 `ALL`）、`scopeField`、`scopeValue`。
+
+---
+
+## 🔄 6. 改写规则（`MybatisDataScopeHandler`）
+
+1. 取当前用户（`AuditUserProvider`）。无用户身份时，`MybatisDataScopeInterceptor` 抛出 `SecurityException`，拒绝执行。
+2. `AuditUserProvider.isAdmin()` 为 `true`（角色为 `administrator` 或 `super_admin`）时不改写。
+3. 规则查询顺序：按 `mapperId` + 角色 ID 查询 `scope-data-table` 与 `role-scope-table`；未命中且注解提供 `code` 时按资源编码查询；均未命中则使用注解值（无注解时 `scopeType` 为 `ALL`，不改写）。
+4. 按范围类型生成条件并通过 `SqlDataScopeAstEngine` 合并到原 SQL。
+5. `UPDATE` 与 `DELETE` 同样改写。`SELECT` 在执行前改写一次，同一 `BoundSql` 不重复追加。
+
+部门子孙查询（`ZhkjScopeModelHandler.getDeptAncestors`）：
+
+- 若存在 `DeptAncestorProvider` Bean（`ObjectProvider.getIfAvailable()`）且其返回值非 `null`（空列表同样直接采用），直接使用其结果；调用异常时记录 WARN 并降级为动态 SQL。
+- 否则执行 `select <id> from <dept-table> where concat(',', <ancestors>, ',') like concat('%,', ?, ',%') and <logic-col> = <value>`（参数为 `deptId`，由 `DataScopeSqlUtil.dataByDept` 生成），按分隔符做整段匹配，部门 `1` 不会命中祖先路径中的 `10`、`11`；结果写入 `SYS_CACHE`；结果为空时下次仍会重新查询。
+
+---
+
+## 💡 7. 典型使用范式
+
+### 7.1 Mapper 注解
 
 ```java
-package io.github.ybb88.demo.datascope;
+@Mapper
+public interface OrderMapper extends BaseMapper<Order> {
 
-import io.github.ybb88.framework.datascope.provider.DeptAncestorProvider;
-import io.github.ybb88.demo.mapper.SysDeptMapper;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Component;
+    /** 仅本部门可见 */
+    @DataAuth(code = "order", column = "dept_id", type = DataScopeEnum.OWN_DEPT)
+    List<Order> selectOrderList(@Param("query") OrderQuery query);
 
-import java.util.List;
+    /** 仅本人可见 */
+    @DataAuth(code = "task", column = "create_user", type = DataScopeEnum.OWN)
+    List<Task> selectTaskList(@Param("query") TaskQuery query);
 
+    /** 自定义条件（value 为 SQL 片段，占位符由用户信息替换） */
+    @DataAuth(code = "project", column = "project_id", type = DataScopeEnum.CUSTOM, value = "project_id IN (1, 2, 3)")
+    List<Project> selectProjectList(@Param("query") ProjectQuery query);
+}
+```
+
+生成条件示例：`WHERE status = 1 AND (dept_id IN (100, 101))`。
+
+### 7.2 子孙部门 SPI
+
+```java
 @Component
 @RequiredArgsConstructor
 public class CustomDeptAncestorProvider implements DeptAncestorProvider {
@@ -85,39 +169,41 @@ public class CustomDeptAncestorProvider implements DeptAncestorProvider {
     private final SysDeptMapper deptMapper;
 
     @Override
-    public List<Long> getSubDeptIds(Long deptId) {
-        // 根据业务自身的部门表或闭包表递归查询所有下级子部门 ID
-        return deptMapper.selectSubDeptIds(deptId);
+    public List<Long> getDeptAncestors(Long deptId) {
+        return deptMapper.selectSubDeptIds(deptId);   // 返回 deptId 及其所有子孙部门 ID（包含 deptId 自身，与 DeptAncestorProvider Javadoc 一致）
     }
 }
 ```
 
-### 5.2 Mapper 查询接口声明 `@DataAuth`
-在 Mapper 查询方法上直接添加注解，指定部门列与人员列：
+`OWN_DEPT_CHILD` 会把当前用户部门 ID 与该 SPI 结果合并（框架不去重，SPI 结果含自身时会出现重复 ID）。方法名 `getDeptAncestors` 沿用框架命名，语义为部门及其子孙部门。
+
+### 7.3 上下文
 
 ```java
-package io.github.ybb88.demo.mapper;
-
-import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.baomidou.mybatisplus.core.metadata.IPage;
-import io.github.ybb88.framework.datascope.annotation.DataAuth;
-import io.github.ybb88.demo.dto.OrderQueryDto;
-import io.github.ybb88.demo.entity.OrderEntity;
-import org.apache.ibatis.annotations.Mapper;
-import org.apache.ibatis.annotations.Param;
-
-@Mapper
-public interface OrderMapper extends BaseMapper<OrderEntity> {
-
-    /**
-     * 自动追加当前登录人所属角色的数据权限过滤条件
-     */
-    @DataAuth(deptField = "dept_id", userField = "create_user")
-    IPage<OrderEntity> selectOrderPage(IPage<OrderEntity> page, @Param("param") OrderQueryDto param);
-}
+DataScopeModel model = DataScopeContext.getDataScope();   // 改写期间有效
 ```
 
-执行时，框架根据当前登录人角色配置自动追加过滤：
-- 若为「本部门及下属部门」：`WHERE ... AND dept_id IN (10, 11, 12)`
-- 若为「仅本人」：`WHERE ... AND create_user = 10001`
-- 若无权限：`WHERE ... AND 1 = 0`
+---
+
+## 🛡️ 8. 行为约束与注意事项
+
+- 无法注入权限条件时，`SqlDataScopeAstEngine.rewriteSql` 抛出 `DataScopeException`，调用方拒绝执行该语句。依赖数据权限的语句须保证可被 JSqlParser 解析，且不得为 `UNION` / `INTERSECT` / `EXCEPT` 等集合运算。
+- `DataScopeSqlUtil` 对表名与列名做字符白名单校验；`DataAuth.column` 与 `scope_column` 不做校验，应由开发者或数据库配置保证。
+- `CUSTOM` 类型的 `scopeValue` 按原文拼接进 SQL，仅可由可信配置写入。
+- `MybatisDataScopeInterceptor` 的字段与构造参数均为具体类 `MybatisDataScopeHandler`（`MybatisDataScopeInterceptor.java` 第 59、63 行），`MybatisDataScopeAutoConfiguration` 亦只注册该类型 Bean；因此 `DataScopeHandler` 接口的其它实现不会被调用。当前可扩展点为 `DeptAncestorProvider`。
+- 部门子孙默认查询按分隔符做整段匹配，不再对 `ancestors` 做子串匹配（见第 9 节）。
+
+---
+
+## 🚫 9. 已知问题（代码现状）
+
+- 数据权限对角色为 `administrator` 或 `super_admin` 的用户整体放行（`RoleUtil.isPrivileged`）。
+- 集合运算语句（`UNION` / `INTERSECT` / `EXCEPT`）暂不支持权限条件注入，遇到时抛出 `DataScopeException`；历史版本会静默放行原 SQL，已于 2026-11-11 修复。
+- 原 `WHERE` 为顶层 `OR` 时，历史版本未加括号导致权限条件被 `OR` 分支绕过，已于 2026-11-11 修复。
+
+---
+
+## 📎 10. 相关文档
+
+- [starter-datascope 模块 README](../../zhkj-framework-starter-datascope/README.md)
+- [starter-mybatis 模块 README](../../zhkj-framework-starter-mybatis/README.md)：MyBatis 拦截器与规则查询实现

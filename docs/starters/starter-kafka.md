@@ -1,24 +1,17 @@
 # 消息队列通信组件：zhkj-framework-starter-kafka
 
-> **模块定位**: 分布式消息队列 Starter，基于 Spring Kafka 深度封装，提供统一发布订阅契约（`ZhkjKafka`）、全链路 TraceId 自动染色、租户身份与安全上下文双向穿透，以及消费异常时的上下文强制双清理安全机制。  
-> **适用基准**: OpenJDK 21 (LTS), Spring Boot 4.1.1, Apache Kafka 3.x+  
+> **模块定位**: 基于 Spring Kafka 的消息 Starter，提供统一生产与消费的 `KafkaTemplate` / `ConcurrentKafkaListenerContainerFactory` 配置、高阶门面 `ZhkjKafka`，以及在生产与消费两端透传链路与租户上下文的拦截器。  
+> **适用基准**: OpenJDK 21 (LTS), Spring Boot 4.1.1, Spring Kafka 4.1.0（根 pom `spring-kafka.version`）  
 > **模块坐标**: `io.github.ybb88:zhkj-framework-starter-kafka`
 
 ---
 
 ## 📋 1. 架构定位与核心设计
 
-在异步事件驱动与流式处理架构中，消息在跨服务传递时，常常丢失了原始请求的上下文（如链路 TraceId、多租户身份 `tenant_id`、发起操作人凭证）。这会导致：
-1. 消费端处理逻辑脱离租户行级隔离保护，引发越权灾难；
-2. 消费端异常时 MDC 未清理，常驻 Worker 线程复用导致日志 TraceId 串号；
-3. 全链路日志追踪断裂，难以追踪跨异步消息的完整调用拓扑。
-
-`zhkj-framework-starter-kafka` 构建了全链路穿透与防污染闭环：
-- **`ZhkjKafka` 统一发布门面**：封装统一的消息发送契约，支持异步回调、同步阻塞与事务发送；
-- **生产者上下文自动拦截注入 (`KafkaContextProducerInterceptor`)**：在发送消息的瞬间，自动从当前线程 `FrameworkContext` 中抓取租户、用户身份与链路 TraceId，写入 Kafka Record Headers 中；
-- **消费者双回调强清理防污染 (`KafkaTraceRecordInterceptor`)**：
-  - 在接收到消息时，自动从 Headers 中解析并还原 `FrameworkContext` 与 MDC；
-  - **异常毁约清理保证**：同时覆写 `afterRecord` 与 `failure` 回调！无论业务 Listener 正常执行完毕还是抛出未捕获异常，均强制在 `finally` 阶段调用 `FrameworkContext.clearAll()` 与 `TraceUtil.clearTraceId()`，彻底堵死 Worker 线程池污染漏洞。
+1. **统一客户端配置**: 生产者与消费者工厂由本模块装配，参数来自 `zhkj.kafka.*`，Key 与 Value 序列化器固定为 String。
+2. **高阶门面**: `ZhkjKafka` 将对象负载序列化为 JSON 字符串后发送，并写入 TraceId 头。
+3. **生产端透传**: `KafkaContextProducerInterceptor` 将 TraceId、主体租户、维度与操作人信息写入 Record Header；不转发未核验委托或票据。
+4. **消费端还原**: `KafkaTraceRecordInterceptor` 与 `KafkaTraceBatchInterceptor` 从 Header 还原 `FrameworkContext` 与 TraceId，并在完成后清理。
 
 ---
 
@@ -31,104 +24,175 @@
 </dependency>
 ```
 
+依赖（来自 `pom.xml`）: `zhkj-framework-core`、`spring-kafka`、`spring-boot-starter`；`spring-boot-configuration-processor` 为 optional。
+
 ---
 
-## 🧱 3. 核心包结构与组件
+## 🧱 3. 包结构
 
 ```
 io.github.ybb88.framework.kafka
-├── client/
-│   └── ZhkjKafka.java                 # 统一发布订阅核心客户端门面
-├── config/
-│   ├── KafkaAutoConfiguration.java    # 消息队列核心配置装配
-│   └── KafkaProperties.java           # Kafka 全局参数配置
-└── interceptor/
-    ├── KafkaContextProducerInterceptor.java # 生产者上下文写入拦截器
-    ├── KafkaTraceRecordInterceptor.java     # 单条记录消费者全生命周期清理拦截器
-    └── KafkaTraceBatchInterceptor.java      # 批量记录消费者双清理拦截器
+├── config/ZhkjKafkaAutoConfiguration.java
+├── core/ZhkjKafka.java
+├── interceptor/
+│   ├── KafkaContextProducerInterceptor.java   # ProducerInterceptor
+│   ├── KafkaTraceRecordInterceptor.java       # RecordInterceptor (单条消费)
+│   └── KafkaTraceBatchInterceptor.java        # BatchInterceptor (批量消费)
+└── props/ZhkjKafkaProperties.java             # zhkj.kafka.*
 ```
 
 ---
 
-## ⚙️ 4. 核心配置清单 (`application.yml`)
+## 🔁 4. 自动装配
+
+`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` 注册 `ZhkjKafkaAutoConfiguration`（`@EnableKafka`，条件 `zhkj.kafka.enabled` 缺省为 `true`）。
+
+| Bean | 条件 | 说明 |
+| :--- | :--- | :--- |
+| `ProducerFactory<String, Object>` | 缺失时 | `DefaultKafkaProducerFactory`，注册 `KafkaContextProducerInterceptor` |
+| `KafkaTemplate<String, Object>` | 缺失时 | — |
+| `ConsumerFactory<String, Object>` | 缺失时 | `DefaultKafkaConsumerFactory` |
+| `kafkaTraceRecordInterceptor` | 名称缺失时 | `KafkaTraceRecordInterceptor` |
+| `kafkaTraceBatchInterceptor` | 名称缺失时 | `KafkaTraceBatchInterceptor` |
+| `kafkaListenerContainerFactory` | 名称缺失时 | 并发数、轮询超时来自 `zhkj.kafka.*`，挂载两个 Trace 拦截器 |
+| `zhkjKafka`（`ZhkjKafka`） | 缺失时 | 若容器中存在 Jackson 3 `ObjectMapper`（`tools.jackson.databind.ObjectMapper`）则注入，否则使用 `JsonUtil.getInstance()` |
+
+### 4.1 地址与消费组解析
+
+| 参数 | 解析顺序 |
+| :--- | :--- |
+| 连接地址 | `spring.kafka.bootstrap-servers` → `zhkj.kafka.bootstrap-servers` |
+| 消费组 | `spring.kafka.consumer.group-id` → `${spring.application.name}-group` → `zhkj.kafka.group-id` |
+
+> 生产者与消费者的其它参数（如 `acks`、`spring.kafka.producer.*`、`spring.kafka.consumer.*`）不参与本模块工厂的构建。本模块仅读取上表与 `zhkj.kafka.*` 项。
+
+---
+
+## ⚙️ 5. 配置项（`zhkj.kafka`）
+
+| 键 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `zhkj.kafka.enabled` | boolean | `true` | 是否启用本模块 |
+| `zhkj.kafka.bootstrap-servers` | String | `127.0.0.1:9092` | 连接地址（`spring.kafka.bootstrap-servers` 优先） |
+| `zhkj.kafka.group-id` | String | `zhkj-default-group` | 仅在无 `spring.kafka.consumer.group-id` 且无 `spring.application.name` 时使用 |
+| `zhkj.kafka.auto-offset-reset` | String | `earliest` | 消费者 `auto.offset.reset` |
+| `zhkj.kafka.enable-auto-commit` | boolean | `false` | 消费者 `enable.auto.commit` |
+| `zhkj.kafka.retries` | int | `3` | 生产者 `retries` |
+| `zhkj.kafka.batch-size` | int | `16384` | 生产者 `batch.size` |
+| `zhkj.kafka.linger-ms` | int | `5` | 生产者 `linger.ms` |
+| `zhkj.kafka.buffer-memory` | int | `33554432` | 生产者 `buffer.memory` |
+| `zhkj.kafka.concurrency` | int | `1` | 监听容器并发数 |
+| `zhkj.kafka.poll-timeout` | long | `3000` | 监听容器轮询超时（毫秒） |
 
 ```yaml
 spring:
   kafka:
     bootstrap-servers: 127.0.0.1:9092
-    producer:
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.apache.kafka.common.serialization.StringSerializer
-      retries: 3
-      acks: 1
-    consumer:
-      group-id: demo-service-group
-      auto-offset-reset: latest
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      enable-auto-commit: true
+  application:
+    name: demo-service
+zhkj:
+  kafka:
+    enabled: true
+    concurrency: 3
+    poll-timeout: 3000
 ```
 
 ---
 
-## 💡 5. 典型使用范式
+## 📨 6. 上下文透传
 
-### 5.1 发送异步消息 (`ZhkjKafka`)
+### 6.1 生产端
+
+`KafkaContextProducerInterceptor.onSend` 在消息发送前，将以下信息写入 Record Header（已存在的头不覆盖）:
+
+| Header | 来源 |
+| :--- | :--- |
+| `X-Trace-Id` | `TraceUtil.getTraceId()`，为空时生成 |
+| `X-Tenant-Id` | `FrameworkContext` 快照 `tenantId` |
+| `X-Dimension-Id` | `dimensionId` |
+| `X-Delegated-Tenant-Id` / `X-Grant-Ticket` | 不生成；无可信票据授权契约 |
+| `X-User-Id` | `userId` |
+| `X-User-Account` | `userAccount` |
+| `X-User-Name` | `userName` |
+| `X-Dept-Id` | `deptId` |
+
+`ZhkjKafka.send` 另行写入 `X-Trace-Id`（来自 MDC）。
+
+### 6.2 消费端
+
+`KafkaTraceRecordInterceptor.intercept` 与 `KafkaTraceBatchInterceptor.intercept`（批量取首条记录的头，以批次为单位）:
+
+1. 设置 MDC 中的 `traceId`（缺失时生成）；
+2. 从 Header 构造 `ContextSnapshot`，租户取 `X-Tenant-Id`，其次 `tenant-id`、`zhkj-tenant-id`；
+   对入站委托目标与票据不恢复到上下文，不能借 Kafka 消息建立跨租户权限；
+3. 非空快照调用 `FrameworkContext.restore`。
+
+完成后（单条：`success`、`failure`、`afterRecord`；批次：`success`、`failure`）调用 `clearContext()`，其实现为 `try { FrameworkContext.clearAll(); } finally { TraceUtil.clearTraceId(); }`，即使清空过程异常也会清理 TraceId。
+
+---
+
+## 💡 7. 使用范式
+
+### 7.1 发送消息
 ```java
-package io.github.ybb88.demo.service;
-
-import io.github.ybb88.framework.kafka.client.ZhkjKafka;
-import io.github.ybb88.framework.util.JsonUtil;
-import io.github.ybb88.demo.dto.OrderCreatedEvent;
+import io.github.ybb88.framework.kafka.core.ZhkjKafka;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 @Service
 @RequiredArgsConstructor
-public class OrderMessageProducer {
+public class OrderEventPublisher {
 
     private final ZhkjKafka zhkjKafka;
 
-    public void publishOrderCreated(OrderCreatedEvent event) {
-        String topic = "topic-order-created";
-        String key = event.getOrderNo();
-        String payload = JsonUtil.toJson(event);
+    public void publishCreated(OrderCreatedEvent event) {
+        // 异步发送，负载对象自动序列化为 JSON
+        zhkjKafka.send("topic-order-created", event.getOrderNo(), event);
+    }
 
-        // 统一发送契约：底层拦截器全自动将当前线程的 TraceId、TenantId 注入 Record Headers
-        zhkjKafka.send(topic, key, payload);
+    public void publishSync(String payload) throws Exception {
+        // 同步发送，超时 5 秒
+        zhkjKafka.sendSync("topic-audit", payload, 5L);
     }
 }
 ```
 
-### 5.2 消费消息与自动还原上下文
-```java
-package io.github.ybb88.demo.listener;
+`ZhkjKafka` 方法:
 
-import io.github.ybb88.framework.tenant.context.TenantContext;
-import io.github.ybb88.framework.util.JsonUtil;
-import io.github.ybb88.demo.dto.OrderCreatedEvent;
-import lombok.extern.slf4j.Slf4j;
+| 方法 | 返回值 |
+| :--- | :--- |
+| `send(String topic, Object data)` | `CompletableFuture<SendResult<String, Object>>` |
+| `send(String topic, String key, Object data)` | `CompletableFuture<SendResult<String, Object>>` |
+| `sendSync(String topic, Object data, long timeoutSeconds)` | `SendResult<String, Object>` |
+| `sendSync(String topic, String key, Object data, long timeoutSeconds)` | `SendResult<String, Object>` |
+| `getKafkaTemplate()` | `KafkaTemplate<String, Object>` |
+
+`sendSync` 系列在超时或失败时抛出 `RuntimeException`（消息前缀 `Kafka 同步发送异常`）；`send` 系列的异常由返回的 `CompletableFuture` 承载，并在 `whenComplete` 中记录 ERROR 日志。
+
+负载转换规则: `null` 发送空字符串；`CharSequence`、`Number`、`Boolean` 使用 `String.valueOf`；其它对象通过 `objectMapper.writeValueAsString` 序列化（未注入时为 `JsonUtil.getInstance()`），失败时回退 `String.valueOf`。
+
+### 7.2 消费消息
+```java
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
-@Slf4j
 @Component
-public class OrderMessageConsumer {
+public class OrderCreatedListener {
 
-    /**
-     * 消费端自动由 KafkaTraceRecordInterceptor 拦截并还原上下文：
-     * 1. 日志框架 MDC 中已自动绑定发送端的 TraceId，实现日志穿透；
-     * 2. TenantContext.getTenantId() 自动拥有发送端的租户身份；
-     * 3. 无论消费成功或异常，拦截器均会强制执行双清理，绝不发生线程池复用污染。
-     */
     @KafkaListener(topics = "topic-order-created")
     public void onMessage(ConsumerRecord<String, String> record) {
-        String currentTenant = TenantContext.getTenantId();
-        log.info("接收到订单消息，当前自动还原租户: [{}]，Key: [{}]", currentTenant, record.key());
-
+        // 消费端已由 KafkaTraceRecordInterceptor 还原 TraceId 与 FrameworkContext
         OrderCreatedEvent event = JsonUtil.parse(record.value(), OrderCreatedEvent.class);
-        // 执行业务消费处理
     }
 }
 ```
+
+消费者的 Value 反序列化器为 `StringDeserializer`，监听方法的参数类型应为 `String` 或 `ConsumerRecord<String, String>`。
+
+---
+
+## 🔗 8. 相关文档
+
+- 核心工具与上下文: [core](./core.md)
+- Web 层过滤器与 TraceId: [starter-web](./starter-web.md)

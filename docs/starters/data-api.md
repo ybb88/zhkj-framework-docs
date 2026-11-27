@@ -1,6 +1,6 @@
 # 数据持久化抽象层：zhkj-framework-data-api
 
-> **模块定位**: 框架无关数据访问与持久层 SPI 抽象层，统一定义泛型实体规范、审计契约、正交维度标记及多数据源 SPI。  
+> **模块定位**: 与 ORM 无关的实体契约与 SPI 抽象层，只定义接口与 POJO 实现，不包含仓储、分页查询或 ORM 注解。  
 > **适用基准**: OpenJDK 21 (LTS), Spring Boot 4.1.1  
 > **模块坐标**: `io.github.ybb88:zhkj-framework-data-api`
 
@@ -8,30 +8,22 @@
 
 ## 📋 1. 架构定位与职责
 
-`zhkj-framework-data-api` 作为持久层契约抽象层，位于 `core` 之上、具体持久化 Starter（`starter-mybatis` / `starter-jpa`）之下：
+`zhkj-framework-data-api` 位于 `zhkj-framework-core` 之上，被各持久层 Starter 引用：
 
-- **框架无关**: 不包含任何第三方 ORM 框架（如 MyBatis-Plus 或 Hibernate）的依赖或注解，保持 100% 纯粹性；
-- **SPI 优先**: 通过 SPI 接口规范多数据源接入与动态仓储获取；
-- **实体正交维度解耦**: 彻底废弃单一强耦合继承树，通过多接口正交解耦（主键强类型泛型、审计契约、租户标记、逻辑删除标记、乐观锁标记），供业务实体按需组合。
+- **框架无关**: 不依赖 MyBatis-Plus、JPA 或 Hibernate。
+- **正交契约**: 主键、审计、租户、逻辑删除、乐观锁各自是独立接口，实体按需组合，不存在单一基类继承链。
+- **SPI**: `AuditUserProvider` 提供当前操作人信息，由业务侧实现，持久层通过 `ObjectProvider` 获取。
+- **无自动装配**: 本模块不包含 `AutoConfiguration.imports`，也不定义 `@ConfigurationProperties`。
 
 ```
-              ┌───────────────────────────┐
-              │  zhkj-framework-core      │
-              └─────────────┬─────────────┘
-                            ▼
-              ┌───────────────────────────┐
-              │  zhkj-framework-data-api  │
-              │  - IAuditEntity<ID>       │
-              │  - ITenantEntity          │
-              │  - PojoBaseEntity / Pojo  │
-              │  - DataSourceProvider SPI │
-              └─────────────┬─────────────┘
-                            │
-              ┌─────────────┴─────────────┐
-              ▼                           ▼
-┌───────────────────────────┐ ┌───────────────────────────┐
-│starter-mybatis (MP实现)   │ │starter-jpa (JPA实现)      │
-└───────────────────────────┘ └───────────────────────────┘
+zhkj-framework-core
+        ▲
+        │
+zhkj-framework-data-api   (契约 + POJO 实现 + AuditUserProvider SPI)
+        ▲
+        ├── zhkj-framework-starter-jpa        (JpaBaseEntity / JpaTenantEntity)
+        ├── zhkj-framework-starter-mybatis    (MybatisBaseEntity / MybatisTenantEntity)
+        └── zhkj-framework-starter-datasource (依赖，无实体)
 ```
 
 ---
@@ -45,78 +37,138 @@
 </dependency>
 ```
 
-> [!NOTE]
-> 通常业务工程只需引入 `zhkj-framework-starter-mybatis` 或 `zhkj-framework-starter-jpa`，`data-api` 会作为传递依赖自动引入。
+依赖关系（来自 `pom.xml`）:
+
+| 依赖 | 范围 | 说明 |
+| :--- | :--- | :--- |
+| `zhkj-framework-core` | compile | 提供 `BaseModel`、`RoleUtil` |
+| `lombok` | provided | 编译期 |
+| `spring-data-commons` | optional | 仅供 `TypeInformation` 兼容垫片编译使用 |
 
 ---
 
-## 🧱 3. 核心包结构与模型契约
+## 🧱 3. 包结构
 
 ```
 io.github.ybb88.framework.data
-├── model/                    # 核心模型与正交维度契约
-│   ├── IEntity.java          # 泛型主键根契约 (ID getId(), void setId(ID id))
-│   ├── IAuditEntity.java     # 审计契约 (创建人、创建时间、更新人、更新时间)
-│   ├── ITenantEntity.java    # 多租户标记契约 (String getTenantId(), void setTenantId(String))
-│   ├── ILogicDeleteEntity.java# 逻辑删除正交标记契约 (T getIsDeleted(), void setIsDeleted(T))
-│   ├── IVersionEntity.java   # 乐观锁版本正交标记契约 (T getVersion(), void setVersion(T))
-│   ├── PojoBaseEntity.java   # 纯 POJO 基础审计实体 (主键默认 Long)
-│   └── PojoTenantEntity.java # 纯 POJO 多租户审计实体 (主键默认 Long，包含 tenantId)
-├── repository/               # 仓储抽象契约
-│   ├── Repository.java       # 通用 CRUD 仓储接口
-│   ├── Page.java             # 通用分页数据容器
-│   └── PageRequest.java      # 分页查询参数请求
-├── query/                    # 条件构造抽象
-│   └── QueryWrapper.java     # 通用查询包装器抽象
-└── spi/                      # 架构级扩展 SPI 接口
-    ├── DataAccessProvider.java# 数据访问提供者 SPI
-    └── DataSourceProvider.java# 数据源提供者 SPI
+├── model/
+│   ├── IEntity.java              # 主键根契约
+│   ├── IAuditEntity.java         # 审计契约 (继承 IEntity)
+│   ├── ITenantEntity.java        # 租户标记契约
+│   ├── ILogicDeleteEntity.java   # 逻辑删除标记契约
+│   ├── IVersionEntity.java       # 乐观锁版本契约
+│   ├── PojoBaseEntity.java       # 纯 POJO 审计实体 (Long 主键)
+│   └── PojoTenantEntity.java     # 纯 POJO 多租户实体
+└── spi/
+    └── AuditUserProvider.java    # 当前操作人 SPI
+
+org.springframework.data.util.TypeInformation   # 兼容垫片 (@Deprecated(forRemoval = true))
 ```
 
 ---
 
-## 🛡️ 4. 正交维度解耦设计体系
+## 🧩 4. 契约接口
 
-传统框架往往设计一条单一而沉重的 `BaseEntity` 继承链，导致业务实体无法自由组合持久化能力。`data-api` 将维度完全解耦：
-
-| 契约接口 | 职责定位 | 继承关系 | 核心方法 |
+| 接口 | 泛型 | 继承 | 方法 |
 | :--- | :--- | :--- | :--- |
-| **`IEntity<ID extends Serializable>`** | 强类型主键根接口 | 继承 `Serializable` | `ID getId()` / `void setId(ID id)` |
-| **`IAuditEntity<ID extends Serializable>`**| 实体审计字段契约 | 继承 `IEntity<ID>` | `createUser`, `createTime`, `updateUser`, `updateTime` |
-| **`ITenantEntity`** | 多租户隔离标记 | 独立继承 `Serializable` | `String getTenantId()` / `void setTenantId(...)` |
-| **`ILogicDeleteEntity<T>`** | 逻辑删除标记 | 独立继承 `Serializable` | `T getIsDeleted()` / `void setIsDeleted(...)` |
-| **`IVersionEntity<T>`** | 乐观锁并发标记 | 独立继承 `Serializable` | `T getVersion()` / `void setVersion(...)` |
+| `IEntity<ID extends Serializable>` | ID | `Serializable` | `ID getId()`、`void setId(ID id)` |
+| `IAuditEntity<ID extends Serializable>` | ID | `IEntity<ID>` | `Long getCreateBy()`、`void setCreateBy(Long)`、`LocalDateTime getCreateTime()`、`void setCreateTime(LocalDateTime)`、`Long getUpdateBy()`、`void setUpdateBy(Long)`、`LocalDateTime getUpdateTime()`、`void setUpdateTime(LocalDateTime)` |
+| `ITenantEntity` | — | `Serializable` | `TenantId getTenantId()`、`void setTenantId(TenantId)` |
+| `ILogicDeleteEntity<T>` | T | `Serializable` | `T getDeleted()`、`void setDeleted(T)` |
+| `IVersionEntity<T>` | T | `Serializable` | `T getVersion()`、`void setVersion(T)` |
 
-### 维度组合范式
-- **纯粹 POJO 单体/轻量场景**：直接使用 `PojoBaseEntity` 或 `PojoTenantEntity`；
-- **MyBatis-Plus 场景**：业务实体继承 `MybatisBaseEntity` 或 `MybatisTenantEntity`（自动实现上述接口并装配 MP 注解）；
-- **JPA 场景**：业务实体继承 `JpaBaseEntity` 或 `JpaTenantEntity`。
+> 注意：`IAuditEntity` 的审计人字段为 `createBy` / `updateBy`（`Long` 类型），与泛型 `ID` 无关。逻辑删除字段访问器为 `getDeleted()` / `setDeleted()`。
 
 ---
 
-## 💡 5. 使用范式与 SPI 扩展
+## 🧰 5. POJO 实现
 
-### 5.1 自定义仓储 SPI 接入 (`DataAccessProvider`)
-在无需依赖具体 ORM 的通用模块中，可通过 SPI 契约调用数据仓储：
+### 5.1 `PojoBaseEntity`
 
+`public abstract class PojoBaseEntity extends BaseModel implements IAuditEntity<Long>, ILogicDeleteEntity<Long>, IVersionEntity<Integer>, Serializable`（类注解 `@Data`、`@EqualsAndHashCode(callSuper = true)`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `id` | `Long` | — | 主键 |
+| `createBy` / `updateBy` | `Long` | — | 操作人 ID |
+| `createTime` / `updateTime` | `LocalDateTime` | — | 审计时间 |
+| `deletedId` | `Long` | `0` | 逻辑删除标识（默认 `0`；类未实现 `getDeleted()` / `setDeleted()`） |
+| `version` | `Integer` | `1` | 乐观锁版本号 |
+
+### 5.2 `PojoTenantEntity`
+
+`public abstract class PojoTenantEntity extends PojoBaseEntity implements ITenantEntity`，新增 `TenantId tenantId`。
+
+> 两个类均为 `abstract`，需由业务实体继承。
+
+---
+
+## 🔐 6. SPI：`AuditUserProvider`
+
+所有方法均为 `default` 实现，业务侧按需覆盖：
+
+| 方法 | 返回值 | 默认实现 |
+| :--- | :--- | :--- |
+| `Long getUserId()` | 当前操作人 ID | `null` |
+| `String getAccount()` | 账号 | `null` |
+| `String getRoleName()` | 角色名称 | `null` |
+| `String getDeptId()` | 部门 ID（字符串） | `null` |
+| `String getRoleId()` | 角色 ID（字符串） | `null` |
+| `Map<String, Object> toUserMap()` | 键值对（`userId`、`account`、`roleName`、`roleId`、`deptId`） | 仅包含非 `null` 项 |
+| `boolean isAdmin()` | 是否具备管理员特权 | `RoleUtil.isPrivileged(getRoleName())` |
+
+`starter-jpa` 的 `AuditUserAuditorAware` 通过 `ObjectProvider<AuditUserProvider>` 读取 `getUserId()`，用于 `@CreatedBy` / `@LastModifiedBy`。`starter-mybatis` 的 `ZhkjMetaObjectHandler` 同样通过 `ObjectProvider<AuditUserProvider>` 注入（由 `MybatisPlusConfiguration` 装配）。
+
+---
+
+## ⚠️ 7. 兼容垫片
+
+`org.springframework.data.util.TypeInformation` 位于本模块源码中（`src/main/java/org/springframework/data/util/TypeInformation.java`），接口体为空，继承 `org.springframework.data.core.TypeInformation`，标注 `@Deprecated(forRemoval = true)`。该类与 Spring Data 的包名相同，使用时需确认类路径中实际生效的版本。
+
+---
+
+## 💡 8. 使用范式
+
+### 8.1 纯 POJO 租户实体
 ```java
-package io.github.ybb88.demo.spi;
+import io.github.ybb88.framework.data.model.PojoTenantEntity;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
 
-import io.github.ybb88.framework.data.spi.DataAccessProvider;
-import io.github.ybb88.framework.data.repository.Repository;
+@Data
+@EqualsAndHashCode(callSuper = true)
+public class OrderRecord extends PojoTenantEntity {
+
+    private String orderNo;
+    private Integer status;
+}
+```
+
+### 8.2 实现操作人 SPI
+```java
+import io.github.ybb88.framework.data.spi.AuditUserProvider;
 import org.springframework.stereotype.Component;
 
 @Component
-public class CustomDataAccessProvider implements DataAccessProvider {
+public class AuthAuditUserProvider implements AuditUserProvider {
 
     @Override
-    public <T, ID> Repository<T, ID> getRepository(Class<T> entityClass) {
-        // 返回与特定存储引擎适配的仓储实例
-        return null;
+    public Long getUserId() {
+        // 由业务侧从认证上下文读取当前操作人 ID
+        return currentUserIdOrNull();
+    }
+
+    @Override
+    public String getAccount() {
+        return currentAccountOrNull();
     }
 }
 ```
 
-### 5.2 规范与防踩坑提示
-- **避免直接在业务层手写 `new PojoTenantEntity()`**：在业务持久层中，推荐直接继承对应 ORM 的专用实体基类（如 `MybatisTenantEntity`），以保证字段自动填充与拦截器生效；
-- **数据权限不可依赖 `data-api`**：细粒度数据权限管控已全面收敛至 `starter-datascope` 模块，严禁将数据权限逻辑散落在本抽象层中。
+---
+
+## 🔗 9. 相关文档
+
+- 持久层实现: [starter-jpa](./starter-jpa.md)（`JpaBaseEntity` / `JpaTenantEntity`）
+- 核心基础: [core](./core.md)
+- 数据权限已迁出本模块，参见 `zhkj-framework-starter-datascope`

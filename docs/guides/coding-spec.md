@@ -1,144 +1,156 @@
 # ZHKJ Framework 开发者编码规范与技术红线
 
-> **文档定位**: 统一全团队编码习惯、杜绝历史异味反模式、保障代码质量与现代 Java 工业级标准对齐。  
+> **文档定位**: 统一团队编码习惯、约束历史反模式、保障代码质量与现代 Java 工业级标准对齐。  
 > **设计与创作者**: Jason.Yang（274107098@qq.com）  
+> **存量说明**: 各条规则的代码现状核对结果见第 6 节；未达标项标注为“存量待治理”，不代表允许新增违规代码。
 
 ---
 
 ## 🚫 1. 架构级“绝对红线”
 
-1. **严禁依赖下沉与反向引用**:
-   - `core` 与 `data-api` 严禁引入任何 Spring Web、Servlet、MyBatis 或具体中间件依赖；
+1. **依赖方向与反向引用**:
+   - `core` 不依赖任何框架模块，`data-api` 仅依赖 `core`；
+   - `core` 与 `data-api` 严禁引入 Spring Web、Servlet、MyBatis 或具体中间件依赖；
    - 工具类严禁反向依赖高层业务类。
-2. **彻底根除常量接口反模式 (Eliminate Constant Interface Antipattern)**:
-   - 严禁在任何模块中声明 `public interface *Constant`；
-   - 所有常量类强制采用 **`public final class` + `private Constructor`** 现代模式封装，杜绝类型污染与不安全继承。
-3. **严禁散落硬编码 HTTP 请求头与加密字符串**:
+2. **根除常量接口反模式**:
+   - 严禁声明 `public interface *Constant`；
+   - 常量类采用 **`public final class` + `private Constructor`** 封装（如 `HeaderConstant`、`CryptoConstant`、`TraceConstant`）。
+3. **请求头与加密字符串统一常量化**:
    - 跨服务请求头统一引用 `HeaderConstant`（如 `HeaderConstant.X_TENANT_ID`、`HeaderConstant.AUTHORIZATION`）；
    - 链路追踪统一引用 `TraceConstant.TRACE_ID`；
-   - 算法与密文前缀统一引用 `CryptoConstant`。
-4. **持久层国密加密与盲索引防漏**:
-   - 严禁在业务 Service 中手写计算盲索引哈希（如手工调用 `generateIndex` 赋值）；
-   - 必须通过 `@EncryptField` / `@BlindIndex` 配合 `ZhkjMetaObjectHandler` 自动注入，确保入库 100% 防漏。
-5. **Spring Boot 4 内部配置类注解规范**:
-   - 仅在 `AutoConfiguration.imports` 中作为顶级入口的类标注 `@AutoConfiguration`；
-   - 内部由主配置类通过 `@Import` 引入的子模块配置类，必须使用 `@Configuration(proxyBeanMethods = false)`，杜绝注解语义二义性并降低 CGLIB 代理开销。
-6. **零业务概念反向渗透 (Zero Business Penetration)**:
-   - 底层框架严禁硬编码具体业务系统代号（如 `ncap`）或具体业务字段，业务扩展点必须通过标准 SPI 接口（如 `DeptAncestorProvider`）暴露。
-7. **高频路径 GC 防护与预编译正则**:
-   - 严禁在 SQL 拦截器或查询主链路中动态拼接编译正则表达式；所有正则必须提取为 `private static final Pattern` 静态预编译常量复用，消除 Minor GC 堆内存抖动。
-8. **跨平台字符集锁死 (StandardCharsets.UTF_8)**:
-   - 涉及字节数组与字符串互转（加解密、网络、Redis 监听）时，必须显式指定 `StandardCharsets.UTF_8`，严禁依赖 JVM 默认编码引发 Windows/Linux 乱码。
-9. **绝对禁止代码行内全限定类名 (Anti-FQCN Rule - 绝对铁律)**:
-   - 严禁在类成员变量、局部变量、方法参数、返回值、强制类型转换、静态方法调用或注解声明中使用带包名的全路径（如 `@org.springframework...`、`com.zhkj...`、`java.util.Base64` 等）；
-   - **所有依赖项必须且只能在文件头部（package 声明下方）集中统一显式 `import`**，保持代码现代工业级整洁度。
+   - 算法名统一引用 `CryptoConstant`（如 `ALGO_SM4`、`ALGO_HMAC_SM3`）。
+4. **持久层国密加密与盲索引**:
+   - 不在业务 Service 中手工计算盲索引哈希后赋值；
+   - 通过 `@EncryptField(blindIndexField = ...)` 与 `@BlindIndex(source = ...)` 声明，由 `ZhkjMetaObjectHandler` 注入。
+5. **自动装配配置类注解**:
+   - 作为自动配置入口的类（在 `AutoConfiguration.imports` 中注册）标注 `@AutoConfiguration`；
+   - 由主配置类通过 `@Import` 或嵌套方式引入的子配置类使用 `@Configuration(proxyBeanMethods = false)`。
+6. **零业务概念渗透**: 底层框架不硬编码业务系统代号或业务字段，业务扩展点通过 SPI 接口（如 `DeptAncestorProvider`）暴露。
+7. **高频路径正则预编译**: 查询主链路与拦截器中的正则统一为 `private static final Pattern`，禁止动态拼接编译。
+8. **字符集显式指定**: 字节与字符串互转（加解密、网络、Redis 监听）必须显式指定 `StandardCharsets.UTF_8`，不依赖平台默认编码。
+9. **Anti-FQCN**: 正文中不使用行内全限定类名，依赖统一在文件头 `import`。
 
 ---
 
 ## 🛠️ 2. 工具类使用与命名规约
 
-### 2.1 强制单数命名规范 (Strict Singular Naming)
-框架已全面物理清除历史复数工具类，所有工具类必须使用正统单数命名：
+### 2.1 单数命名规范
+框架工具类使用单数命名，以下为现行类（均位于 `zhkj-framework-core`）：
 
-| 规范单数工具类 | 核心功能说明 | 严禁使用的旧复数类 |
+| 规范单数工具类 | 核心功能说明 | 不应新增的复数写法 |
 | :--- | :--- | :--- |
-| **`JsonUtil`** | Jackson 统一 JSON 序列化与反序列化 | ~~`JsonUtils`~~ |
-| **`IdUtil`** | UUID、雪花算法 ID、序号生成器 | ~~`IdUtils`~~ |
-| **`DateUtil`** | Java 8 日期时间、经典 Date 格式化 | ~~`DateTimeUtil`~~, ~~`ConcurrentDateFormat`~~ |
-| **`StringUtil`** | 字符串判空、占位符替换、驼峰下划线互转 | ~~`StringUtils`~~ |
-| **`DigestUtil`** | MD5、SHA256、国密 SM3 消息摘要 (支持 String 与 byte[] 字节流) | ~~`DigestUtils`~~ |
-| **`BeanUtil`** | 高性能字节码 Bean 属性拷贝与 Map 互转 | ~~`BeanUtils`~~ |
-| **`PropUtil`** | 属性配置文件加载与读取 | ~~`PropsUtil`~~ |
+| **`JsonUtil`** | Jackson 统一 JSON 序列化与反序列化（异常统一为 `JsonParseException`） | `JsonUtils` |
+| **`IdUtil`** | UUID 生成（`randomUUID`、`simpleUUID`、`fastUUID`、`fastSimpleUUID`） | `IdUtils` |
+| **`DateUtil`** | 日期时间格式化与解析（`dateToString` 为推荐方法名，`DateToString` 已 `@Deprecated(forRemoval = true)`） | `DateTimeUtil`, `ConcurrentDateFormat` |
+| **`StringUtil`** | 字符串判空、清洗、标识符安全化等 | `StringUtils` |
+| **`DigestUtil`** | MD5（`md5Hex`）、SHA256（`sha256`）消息摘要，支持 `String` 与 `byte[]` 入参 | `DigestUtils` |
+| **`BeanUtil`** | Bean 属性拷贝与 Map 互转 | `BeanUtils` |
+| **`PropUtil`** | `Properties` 属性读写（`getProperty` / `setProperty`，不含文件加载） | `PropsUtil` |
 
-### 2.2 工具类架构级防御与不可实例化约束
-- **强制 `final` 修饰与私有构造器**: 全框架所有 `*Util` 类必须声明为 **`public final class`**，并显式提供私有构造器 `private XxxUtil() {}`，杜绝任何外部实例化或不安全继承。
-- **常量池类标准封装**: `StringPool` 与 `CharPool` 统一声明为带有私有构造器的 `public final class`，严禁以 `implements StringPool` 反模式使用。
+国密 SM3 摘要不在 `DigestUtil` 中，位于 `zhkj-framework-starter-crypto` 的 `SM3Util`。
+
+> 源码中不存在 `*Utils` 复数工具类、`DateTimeUtil` 与 `ConcurrentDateFormat`（已删除）。`DateUtil.DateToString` 为 `@Deprecated(since = "2026.4.1.0", forRemoval = true)` 兼容转发方法（`DateUtil.java:604-607`），新代码使用 `dateToString`。
+
+### 2.2 工具类不可实例化约束
+- `*Util` 类应声明为 **`public final class`** 并提供 **`private XxxUtil() {}`**；
+- `StringPool` 与 `CharPool` 为带私有构造器的 `public final class`，以静态字段方式引用（如 `StringPool.DOT`）。
 
 ### 2.3 优先使用现代 Java 标准能力
-- **Base64**: 直接使用 JDK 8+ 原生 `java.util.Base64`，严禁新建浅包装类；
-- **时间格式化**: 使用 `DateUtil` 内置的常量与 `DateTimeFormatter`，严禁在并发环境使用非线程安全的 `SimpleDateFormat`。
+- **Base64**: 直接使用 JDK 8+ `java.util.Base64`，不新建包装类；
+- **时间格式化**: 使用 `DateUtil` 或 `DateTimeFormatter`，不在并发环境中共享 `SimpleDateFormat`。
 
 ---
 
 ## ⚡ 3. 现代化 API 调用清单
 
-在日常编码中，严格遵守现代框架 API 规约，清零废弃警告：
-
-1. **JJWT 0.12+**:
-   - 严禁使用废弃的 `setSigningKey` 与 `SignatureAlgorithm`；
-   - 统一采用流式语法：
+1. **JJWT 0.12+**（`SecureUtil` 已采用 `Jwts.parser().verifyWith(...)`）:
+   - 不使用 `setSigningKey` 与 `SignatureAlgorithm` 等废弃 API；
+   - 构造示例：
      ```java
      Jwts.builder().header().type(...).and().issuer(...).claims(...).signWith(secretKey).compact();
      ```
 2. **Spring Data Redis**:
-   - 严禁使用带 `(key, value, timeout, TimeUnit)` 的废弃重载；
-   - 统一传入 `Duration`：`redisTemplate.opsForValue().set(key, val, Duration.ofMinutes(10));`。
+   - 不使用带 `(key, value, timeout, TimeUnit)` 的重载；
+   - 使用 `Duration`：`redisTemplate.opsForValue().set(key, val, Duration.ofMinutes(10));`。
 3. **Spring JDBC (`JdbcTemplate`)**:
-   - 严禁使用带 `(sql, Object[] args, RowMapper)` 的废弃重载；
-   - 统一使用原生变长参数：`jdbcTemplate.query(sql, rowMapper, arg1, arg2);`。
-4. **Spring Batch 6+**:
-   - 显式声明并注入 `JobRegistry`，Chunk 必须使用流式调用 `StepBuilder.chunk(n).transactionManager(tm)`。
+   - 不使用带 `(sql, Object[] args, RowMapper)` 的重载；
+   - 使用变长参数：`jdbcTemplate.query(sql, rowMapper, arg1, arg2);`。
+4. **Spring Batch 6+**（业务工程场景，框架 pom 不引入 Spring Batch）:
+   - 显式声明并注入 `JobRegistry`；Chunk 使用 `StepBuilder.chunk(n).transactionManager(tm)`。
 
 ---
 
 ## 🧵 4. 统一上下文传递规范 (`FrameworkContext`)
 
-严禁依赖隐式 `InheritableThreadLocal`（在线程池复用时极易产生串号与脏数据污染）。在异步线程（`@Async`、线程池）、批处理（Spring Batch）或消息队列消费者中，必须显式传递并受控释放上下文：
+不依赖隐式 `InheritableThreadLocal`。异步线程（`@Async`、线程池）、批处理或消息消费者中，显式传递并受控释放上下文：
 
 ```java
-// 1. 在主线程捕获完整上下文快照
-FrameworkContext.Snapshot snapshot = FrameworkContext.capture();
+import io.github.ybb88.framework.context.ContextScope;
+import io.github.ybb88.framework.context.ContextSnapshot;
+import io.github.ybb88.framework.context.FrameworkContext;
 
-// 2. 在子线程或异步任务中执行
+// 1. 在请求线程中捕获完整上下文快照
+ContextSnapshot snapshot = FrameworkContext.capture();
+
+// 2. 在子线程中执行
 executor.execute(() -> {
     try (ContextScope scope = FrameworkContext.openScope(snapshot)) {
-        // 在作用域内，TenantContext、SecurityContextHolder 等全部自动还原
+        // 作用域内 TenantContext、SecurityContextHolder 等已还原
         orderService.processAsyncOrder();
-    } // 退出作用域时，所有上下文自动彻底释放，防止线程池复用污染
+    } // 离开作用域时自动清理，防止线程池复用污染
 });
 ```
 
 ---
 
-## 🏛️ 5. 实体架构与泛型规范 (Entity Architecture & Generic Specification)
+## 🏛️ 5. 实体架构与泛型规范
 
-### 5.1 泛型实体主键规范
-框架全面采用强类型泛型接口 `IEntity<ID extends Serializable>` 与 `IAuditEntity<ID extends Serializable>`，杜绝历史 `Object id` 弱类型设计与方法重载歧义。在实体继承时，严格遵循以下继承标准：
+### 5.1 主键与实体基类
+框架使用泛型接口 `IEntity<ID extends Serializable>` 与 `IAuditEntity<ID extends Serializable>`（`zhkj-framework-data-api`）。
 
-1. **默认 Long 雪花算法主键（绝大多数业务实体）**：
-   - 直接继承 **`MybatisBaseEntity`**（内部已特化实现 `MybatisAuditEntity<Long>`，自动装配 `@TableId(type = IdType.ASSIGN_ID)`、审计字段与默认逻辑删除）。
-   - 示例：
-     ```java
-     @Data
-     @EqualsAndHashCode(callSuper = true)
-     @TableName("biz_order")
-     public class Order extends MybatisBaseEntity {
-         private String orderNo;
-         private BigDecimal amount;
-     }
-     ```
-2. **自定义主键类型（如 String 租户/机构编码、UUID 等）**：
-   - 继承 **`MybatisAuditEntity<ID>`**，并在泛型参数中明确指定主键类型（如 `String` 等）。
-   - 子类自行声明 `@TableId` 物理主键字段及具体生成策略。
-   - 示例：
-     ```java
-     @Data
-     @EqualsAndHashCode(callSuper = true)
-     @TableName("sys_tenant")
-     public class SysTenant extends MybatisAuditEntity<String> {
-         @TableId(type = IdType.INPUT)
-         private String id;
-         
-         private String tenantName;
-     }
-     ```
+1. **默认 Long 主键（雪花 ID）**: 继承 **`MybatisBaseEntity`**（其继承 `MybatisAuditEntity<Long>`，并声明 `@TableId(type = IdType.ASSIGN_ID)`）。
+   ```java
+   @Data
+   @EqualsAndHashCode(callSuper = true)
+   @TableName("biz_order")
+   public class Order extends MybatisBaseEntity {
+       private String orderNo;
+       private BigDecimal amount;
+   }
+   ```
+2. **自定义主键类型（如 String 编码）**: 继承 **`MybatisAuditEntity<ID>`**，由子类声明 `@TableId` 字段与生成策略。
+   ```java
+   @Data
+   @EqualsAndHashCode(callSuper = true)
+   @TableName("sys_tenant")
+   public class SysTenant extends MybatisAuditEntity<String> {
+       @TableId(type = IdType.INPUT)
+       private String id;
 
-### 5.2 维度标记接口正交解耦 (Orthogonal Dimension Markers)
-框架将实体能力划分为正交维度，`ILogicDeleteEntity<T>`、`ITenantEntity`、`IVersionEntity<T>` 均直接继承 `Serializable`，彻底从 `IEntity` 依赖树中解耦：
-- **设计原则**：维度标记接口与实体的物理主键类型无关，各维度职责完全正交。
-- **自由组装**：业务实体可根据自身持久化特征自由组合（例如仅需逻辑删除的实现 `ILogicDeleteEntity<Integer>`；多租户实体实现 `ITenantEntity`；需要乐观锁并发控制的实现 `IVersionEntity<Integer>`），杜绝由于单一根继承链导致的虚假继承和冗余方法重载。
+       private String tenantName;
+   }
+   ```
+3. 逻辑删除与租户能力由 `MybatisLogicEntity`、`MybatisTenantLogicEntity`、`MybatisTenantEntity` 等基类提供（`starter-mybatis/.../base/`）。
 
-### 5.3 Jackson 3 架构纪律与序列化安全 (Rule 20)
-在实体层与框架通用层**严禁引入 `com.fasterxml.jackson.*` 注解**（如 `@JsonIgnore`、`@JsonProperty`、`@JsonSetter`）：
-- **架构根因**：OpenAPI / SpringDoc（基于 Jackson 2 内核）在扫描实体属性时，若基类与子类存在 `setId(Object)` 与 `setId(Long)` 双重定义，会抛出 `Conflicting setter definitions for property "id"` 异常。
-- **Javac 桥接解法**：通过泛型继承 `MybatisAuditEntity<ID>`，Javac 编译器在编译期会自动生成带有 `ACC_BRIDGE` / `ACC_SYNTHETIC` 标记的桥接字节码。SpringDoc、Swagger 以及 Jackson 3 会自动忽略合成桥接方法，仅识别唯一的强类型 setter，既保证了实体层遵循纯粹的 Jackson 3 体系（Rule 20），又从底层天然规避了任何第三方文档/序列化工具的 Setter 冲突。
+### 5.2 维度标记接口
+`ILogicDeleteEntity<T>`、`ITenantEntity`、`IVersionEntity<T>` 均直接继承 `Serializable`，与实体主键类型无关，可按需组合实现。
+
+### 5.3 Jackson 与实体注解
+实体与框架通用层不引入 `com.fasterxml.jackson.*` 注解（存量例外：`zhkj-framework-core` 的 `tenant/TenantId.java:3-4` 引用了 `com.fasterxml.jackson.annotation`，待治理）。框架使用 Jackson 3（`tools.jackson.*`）。
+
+---
+
+## 6. 代码现状核对（存量待治理）
+
+以下为对当前工作树的抽样核对结果，用于说明规范与代码的差距；新增代码应遵循上文规约。
+
+| 规则 | 现状 | 位置 |
+| :--- | :--- | :--- |
+| 工具类私有构造器（第 2.2 节） | `SpringUtil` 未声明私有构造器 | `zhkj-framework-core/src/main/java/io/github/ybb88/framework/util/SpringUtil.java:15` |
+| Anti-FQCN（第 1.9 条） | 行内全限定类名 2 处（已复核） | `zhkj-framework-core/.../util/crypto/BlindIndexUtil.java:75-77`（`java.security.*`）；`zhkj-framework-starter-mybatis/.../config/MybatisPlusConfiguration.java:93,104`（`com.baomidou.*`） |
+| 自动配置注解（第 1.5 条） | 切面类 `RequestLogAspect` 标注了 `@AutoConfiguration`，待确认是否应改为其他注解 | `zhkj-framework-starter-web/.../logger/RequestLogAspect.java:54` |
+| 框架层不硬编码业务表名（第 1.6 条） | 数据权限默认表名 `sys_org`（:39）、`zhkj_scope_data`（:64）、`zhkj_role_scope`（:69） | `zhkj-framework-starter-datascope/.../props/DataScopeProperties.java:39,64,69` |
+| 盲索引不回退（`docs/architecture/security.md` 第 2.3.2 节） | SPI 提供者失败时回退默认算法 | `zhkj-framework-core/.../util/crypto/BlindIndexUtil.java:119,126,209` |
+| 日期格式化线程安全（第 2.3 节） | Jackson 配置中构造 `SimpleDateFormat` 实例（需确认 Jackson 是否克隆） | `zhkj-framework-starter-web/.../config/JacksonConfiguration.java:52` |
+
+已符合规约的项（抽样）: `getBytes()` 无参调用在 `zhkj-framework-*/src/main` 中未发现；`StringPool`/`CharPool` 为 `final class`；`StringUtil`、`JsonUtil` 等 `*Util` 类均为 `final` 且（除 `SpringUtil` 外）具备私有构造器；框架源码未发现 `zhkj-ncap` 字样；Jackson 注解仅见于 `zhkj-framework-core/.../tenant/TenantId.java:3-4`（存量例外，见第 5.3 节）。
